@@ -26,6 +26,8 @@ CMake Error at FEX/CMakeLists.txt:529 (string):
 
 The same configure log also reported missing Python `packaging` and `pkg_resources` imports in `FEX/Scripts/aarch64_fit_native.py`. The five `HAS_SYSCALL_GETCPU/GETTID/TGKILL/STATX/RENAMEAT2` probes reported `Failed`; source inspection shows these are optional `check_cxx_source_compiles` probes, not independently fatal configure errors (`FEX/FEXHeaderUtils/CMakeLists.txt:5-56`).
 
+**Additional reported compile error (UNVERIFIED):** `FEX/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp:711` references `MEM_IMAGE`, `MEM_MAPPED`, and `MEM_PRIVATE` inside an `#ifdef FEX_IOS_HOST` block at line 707. Those are Windows `VirtualQuery` constants. The pinned source has no `_WIN32` guard around this diagnostic block, while `build/fex-ios/build.sh` defines `FEX_IOS_HOST` for the native iOS target. The report says Darwin compilation rejects these identifiers; run `38643156359` was still in progress at last observation, so its log has not confirmed this error.
+
 ## Tried and ruled out
 
 - Re-running the same source without changing the configure path does not address Darwin's missing `/proc`; the previous failing run is evidence.
