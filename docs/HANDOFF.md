@@ -93,7 +93,7 @@ Fetch the completed log for run `38643156359` once and inspect the first FEX con
 
 ### Step 4 complete
 
-**Done:** Added `workflow_dispatch.only_stage` (`all` or `fex-ios`), cache restore hit reporting with an exact-hit requirement for the FEX-only dispatch, and a `scripts/build-ipa.sh` branch that initializes only FEX sources, skips LLVM bootstrap and unrelated build stages, then exits after FEX iOS. The existing `make -k -j$(sysctl -n hw.ncpu)` plus sorted unique compiler error report stays in `build/fex-ios/build.sh`. Updated `PROGRESS.md`; its cache restore status remains **UNVERIFIED** until runner output.
+**Done:** Commit `712e358` adds `workflow_dispatch.only_stage` (`all` or `fex-ios`), cache restore hit reporting with an exact-hit requirement for the FEX-only dispatch, and a `scripts/build-ipa.sh` branch that initializes only FEX sources, skips LLVM bootstrap and unrelated build stages, then exits after FEX iOS. The existing `make -k -j$(sysctl -n hw.ncpu)` plus sorted unique compiler error report stays in `build/fex-ios/build.sh`. Updated `PROGRESS.md`; its cache restore status remains **UNVERIFIED** until runner output.
 
 **Gate:** The artifact upload conditions and `WINEPHONE_BINARY_RELEASE_CLEARED` value were left unchanged. `DECISIONS.md` was not modified.
 
