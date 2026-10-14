@@ -98,3 +98,19 @@ The remaining `rg` hits for `syscall`, `<linux/...>`, `/proc`, `MEM_*`, `Virtual
 
 **Verification status:** `git -C FEX apply --check ../patches/fex-darwin.patch` passes against the pinned submodule. Darwin compile, complete error inventory, static-library output, the requested x86-64 Fibonacci JIT execution, macOS `MAP_JIT` behavior, and iOS debugger-attached JIT are all **UNVERIFIED**. The active workflow run `38643156359` was observed once as `in_progress`; per instruction it was not polled and no result is claimed.
 
+## Step 5 — retraction: `FEX_IOS_HOST` is the Windows-PE-module define; patch deleted
+
+**Source/pin:** FEX `f59cab95659e8add0c88f0c76ec1cf483c536dbf`; Madeira root `279fd0f83170425db002fe25d6bd62f6355f497d`. The local FEX submodule was checked out at the pin for this reading (`git -C FEX rev-parse HEAD` = the pin).
+
+**Corrected finding.** Step 4's "the iOS static FEXCore build also defines `FEX_IOS_HOST`" premise is wrong. `FEX_IOS_HOST` (and `FEX_IOS_HOST_BUILD`) is the Windows-PE-module flavour of the iOS host:
+
+- Madeira defines them only in `build/fex-wow64/build.sh:15-16` and `build/fex-arm64ec/build.sh:22-23` (both `toolchain_mingw.cmake` / MinGW builds). Madeira's `build/fex-ios/build.sh` defines neither.
+- `FEX/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp:719` (pinned, unmodified) says: *"VirtualQuery exists only in the FEX_IOS_HOST (Windows module) builds; the native iOS FEXCore build (build/fex-ios) reports without the region."* So the block guarded by `#ifdef FEX_IOS_HOST` at `:707` is **not** part of the native library, and WinePhone's `-DFEX_IOS_HOST` is what pulled `MEMORY_BASIC_INFORMATION`/`VirtualQuery`/`MEM_*` into a Darwin compile.
+- No `CMakeLists.txt`/`*.cmake` in the pin defines the macro; `FEX/CMakeLists.txt:123` is `FEX_IOS_HOST_BUILD`, which only selects `ENABLE_GUEST_WINDOW` (`:124-128`).
+- The native library's iOS behaviour comes from `__APPLE__`: `FEXCore/include/FEXCore/Utils/DualMap.h:7`, `CodeEmitter/CodeEmitter/Buffer.h:25,120`, `FEXCore/Source/Interface/Core/JIT/JIT.cpp:995,1316` all read `defined(__APPLE__) || defined(FEX_IOS_HOST)`.
+- The app compiles the same headers without the macro — `app/Madeira.xcodeproj/project.pbxproj:831` is `GCC_PREPROCESSOR_DEFINITIONS = ("DEBUG=1","$(inherited)")`, and `app/Madeira/FEXBridge.mm:21-22` includes `AllocatorHooks.h` and `DualMap.h` — so defining the macro in the library is also a macro/ODR mismatch with its consumer.
+
+**Action:** `build/fex-ios/build.sh` drops `FEX_IOS_HOST_BUILD=ON` and `-DFEX_IOS_HOST` from the C/C++/ASM flags, matching Madeira. `patches/fex-darwin.patch` is **deleted** (its single hunk is unreachable without the macro and unnecessary in the MinGW build where `_WIN32` is defined). No source guard is added, because the recipe needs none once the flag is removed. `TUNE_CPU=none`, `CMAKE_SYSTEM_PROCESSOR=arm64`, `make -k` and the sorted `error:` summary are unchanged.
+
+**UNVERIFIED:** Darwin configure/compile with the corrected flags; the failed log of run `38644632372`, which this worktree could not read (no `gh`, no token, REST API HTTP 403 rate-limited). The fix is recipe-derived, not log-confirmed.
+

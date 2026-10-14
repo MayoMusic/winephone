@@ -102,3 +102,29 @@ Fetch the completed log for run `38643156359` once and inspect the first FEX con
 **Current blocker:** FEXCore Darwin configure/compile result is unknown. Run `38644632372` had one observed `in_progress` status and was not polled.
 
 **Next step:** Commit and push the complete stage-limited FEX fix as the single non-`[skip ci]` change, launch one `fex-ios` dispatch, and inspect that run once.
+
+### Resumed in the cloud worktree (2026-10-14)
+
+**Step 0 — done.** Fetched `handoff/fex-darwin-configure` (branch HEAD `39e6c03`). Its `docs/HANDOFF.md` is a strict subset of main's: `git diff HEAD origin/handoff/fex-darwin-configure -- docs/HANDOFF.md` shows 42 deletions and **0 insertions** main→branch, so the "copy HANDOFF.md onto main" requirement is already satisfied and no content is lost. The handoff branch diverged at `d218a37`; main carries nine commits it does not (`dc95674`..`b1f0696`).
+
+**Step 1 — BLOCKED; the failed log could not be read from this worktree.** Run `38644632372` (commit `bb733f6`) failed after 11m22s, but:
+
+- `gh` is not installed here and there is no GitHub token in the environment;
+- the unauthenticated REST API returns `HTTP 403 {"message":"API rate limit exceeded ..."}` for IP `208.72.218.131` (core `60/60` used, reset `22:48:03Z`);
+- GitHub's Actions log download endpoint requires authentication regardless.
+
+**No log has been read, and no first error or `error:` list is recorded yet.** Requested from the user: `gh run view 38644632372 --repo MayoMusic/winephone --log-failed` (or the `FEX compiler error summary:` block plus the first `error:` line). This is the decisive input for Step 4 and is not guessed here.
+
+**Step 2/3 finding — `FEX_IOS_HOST` should not be defined for the native `fex-ios` build.** Read locally at the exact pins (FEX `f59cab95659e8add0c88f0c76ec1cf483c536dbf`, Madeira root `279fd0f83170425db002fe25d6bd62f6355f497d`):
+
+1. Madeira's own `build/fex-ios/build.sh` (the tree WinePhone is forked from) passes **neither** `FEX_IOS_HOST_BUILD` nor `FEX_IOS_HOST` — only `CMAKE_SYSTEM_NAME=iOS`, `CMAKE_OSX_ARCHITECTURES=arm64`, the SDK/target/build-type, the `BUILD_*`/`ENABLE_*` options, and `cmake --build ... --target FEXCore FEXCore_Base`.
+2. Madeira passes those two flags **only** in the two Windows-PE-module scripts: `build/fex-wow64/build.sh:15-16` (comment: "The options are the iOS host build's") and `build/fex-arm64ec/build.sh:22-23`.
+3. The fork's own comment at `FEX/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp:719` states the intent outright: *"VirtualQuery exists only in the FEX_IOS_HOST (Windows module) builds; the native iOS FEXCore build (build/fex-ios) reports without the region."* That is exactly the `#ifdef FEX_IOS_HOST` block whose `MEM_IMAGE`/`MEM_MAPPED`/`MEM_PRIVATE`/`VirtualQuery` use is a Darwin compile error — a parse error that only exists because WinePhone (unlike Madeira) defined the macro here.
+4. No CMake file in the pinned FEX tree defines `FEX_IOS_HOST`; it is purely a command-line define (`grep` over every `CMakeLists.txt`/`*.cmake` returns only `FEX_IOS_HOST_BUILD` at `FEX/CMakeLists.txt:123`).
+5. The app target compiles the same FEXCore headers **without** the macro: `app/Madeira.xcodeproj/project.pbxproj:831` sets `GCC_PREPROCESSOR_DEFINITIONS = ("DEBUG=1", "$(inherited)")`, and `app/Madeira/FEXBridge.mm:21-22` includes `<FEXCore/Utils/AllocatorHooks.h>` and `<FEXCore/Utils/DualMap.h>`, both `FEX_IOS_HOST`-sensitive. Building `libFEXCore.a` with the macro while the app compiles those headers without it is a macro/ODR mismatch.
+
+**Fix applied (intermediate commit, `[skip ci]`).** `build/fex-ios/build.sh` no longer passes `FEX_IOS_HOST_BUILD=ON` or `-DFEX_IOS_HOST` on C/C++/ASM, matching Madeira's recipe; `patches/fex-darwin.patch` is deleted because its only hunk guarded a Windows-API diagnostic that is no longer reached. Kept: `CMAKE_SYSTEM_PROCESSOR=arm64` (the runner's CMake otherwise leaves it empty → "Unsupported processor type .") and `TUNE_CPU=none` (Madeira's ARM64EC script sets `TUNE_CPU` for the same reason), plus `make -k` and the sorted `error:` summary.
+
+**UNVERIFIED:** the actual failing error for `bb733f6` (log not read); whether removing `FEX_IOS_HOST` lets FEXCore configure and compile on Darwin; cache restore; IPA/device behaviour.
+
+**Next step:** user pastes the failed log; record its first error and full `error:` list here, then commit the fix as the single non-`[skip ci]` change and read the one resulting run.

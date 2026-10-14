@@ -35,8 +35,8 @@
 
 - **Evidence:** GitHub Actions run `38637082925` completed bootstrap/cache and failed FEX configure after `NeedDisabledSVE.py` attempted `/proc/cpuinfo`; its `aarch64_fit_native.py` import failure left the CPU string empty for CMake `string(STRIP ...)`. The five `HAS_SYSCALL_*` messages are optional compile probes, not by themselves fatal. Exact FEX source pin: `f59cab95659e8add0c88f0c76ec1cf483c536dbf`.
 - **Impact:** No Darwin configure, FEXCore compile, IPA link/package, or device test is proven.
-- **Next path:** The iOS target uses generic `TUNE_CPU=none`; `patches/fex-darwin.patch` handles the SVE missing-proc path and guards Linux-only syscall probes. Confirm once in the macOS workflow, then address the first compile error.
-- **Status:** Active; source-level patch validated against pinned FEX and pending push/CI confirmation.
+- **Next path:** Keep generic `TUNE_CPU=none`; `patches/fex-darwin.patch` is **deleted** and `build/fex-ios/build.sh` no longer defines `FEX_IOS_HOST`/`FEX_IOS_HOST_BUILD`, which are the Windows-PE-module (`fex-wow64`/`fex-arm64ec`) flags, not native `fex-ios` ones (`docs/MADEIRA_RECIPE.md` correction; `FEX/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp:719`). Confirm configure+compile once in the macOS `only_stage=fex-ios` dispatch, then address the first remaining compile error.
+- **Status:** Active. Run `38644632372` (commit `bb733f6`) failed after 11m22s, but its log could not be read here (no `gh`/token; REST API HTTP 403 rate-limited) — first error and full `error:` list are still unknown and are requested from the user. The `FEX_IOS_HOST` fix is recipe-derived and **UNVERIFIED** until CI.
 
 ## B-005: License/provenance review needed before public binary release
 

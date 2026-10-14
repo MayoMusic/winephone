@@ -1,9 +1,0 @@
-diff --git a/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp b/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp
---- a/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp
-+++ b/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp
-@@ -707,4 +707,4 @@
--#ifdef FEX_IOS_HOST
-+#if defined(FEX_IOS_HOST) && defined(_WIN32)
-   MEMORY_BASIC_INFORMATION mbi {};
-   const char* type = "?";
-   if (VirtualQuery(reinterpret_cast<LPCVOID>(GPRs[AddressReg]), &mbi, sizeof(mbi))) {
