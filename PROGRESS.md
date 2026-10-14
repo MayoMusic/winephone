@@ -50,3 +50,9 @@
 - Run `38628969464` passed Xcode selection, Homebrew setup, checksum-toolchain setup, and submodule fetch. It ran 20m 4s, then failed in the iOS LLVM build at `lib/LLVMHello.dylib`: Apple ld rejected `llvm-ios-build/lib/Transforms/Hello/LLVMHello.def` as an unknown file type.
 - Blocker ladder rung 1: configure LLVM with examples, tests, benchmarks, docs, plugins and tools disabled for the iOS target. The failing `LLVMHello` target is an example plugin, not a WinePhone runtime dependency.
 - The Xcode command reported Xcode 26.6 / iOS SDK 26.5. No Wine, FEX, DXMT or app product build was reached; no IPA exists.
+
+### Third macOS workflow attempt
+
+- Run `38631948290` completed LLVM after 35m 8s, then built GnuTLS and FFmpeg successfully (GnuTLS 279s; FFmpeg 48s). It failed at `=== fex-ios ===`: the pinned FEX `CMakeLists.txt` saw an empty `CMAKE_SYSTEM_PROCESSOR` and aborted with `Unsupported processor type .`.
+- Blocker ladder rung 1: set `CMAKE_SYSTEM_PROCESSOR=arm64` explicitly for the iOS cross-configuration and enable FEX's `FEX_IOS_HOST_BUILD` plus its required `FEX_IOS_HOST` C/C++/ASM defines, matching the existing ARM64EC iOS build recipe.
+- FEX, Wine, DXMT and app targets were not reached. No IPA exists.
