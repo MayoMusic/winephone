@@ -31,12 +31,12 @@
 - **Next path:** Build IPA in CI, then user installs/enables JIT and shares logs. User will provide a game name before title-specific analysis.
 - **Status:** Active.
 
-## B-006: macOS workflow and cold toolchain build unverified
+## B-006: FEX iOS configure assumes Linux host probes
 
-- **Evidence:** `scripts/bootstrap.sh` and `.github/workflows/build-ipa.yml` have not run; the Windows host has no Xcode and GitHub is unauthenticated.
-- **Impact:** No evidence yet that LLVM, component libraries, Xcode, or IPA packaging complete on the selected runner.
-- **Next path:** After user authentication, start the workflow, inspect the first failure logs, and iterate.
-- **Status:** Active.
+- **Evidence:** GitHub Actions run `38637082925` completed LLVM/toolchain bootstrap and cache save, then FEX's `aarch64_fit_native.py` and `NeedDisabledSVE.py` failed because Python packaging modules were absent and `/proc/cpuinfo` does not exist on Darwin. The failed empty CPU string stopped CMake at `FEX/CMakeLists.txt:529`.
+- **Impact:** The IPA build has not passed FEX configuration; no product link or IPA exists.
+- **Next path:** Set `TUNE_CPU=none` for the generic iOS ARM64 build and rerun the cached workflow.
+- **Status:** Active; mitigation committed locally and pending push.
 
 ## B-005: License/provenance review needed before public binary release
 

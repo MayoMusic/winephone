@@ -62,3 +62,10 @@
 - GitHub Actions did not retain a cache after the prior job failed, so LLVM would have rebuilt from source after every downstream failure.
 - Updated CI to run bootstrap as its own successful step, explicitly save pinned LLVM/toolchain outputs immediately afterward, then skip duplicate bootstrap inside the IPA packaging script. Cache action save is pinned to `actions/cache` v4.2.4 commit `0400d5f644dc74513175e3cd8d07132dd4860809`.
 - This change reduces future iteration cost; cache save and restoration are not yet verified.
+
+### Fourth macOS workflow attempt
+
+- Run `38637082925` completed the cold bootstrap in 27m 38s, saved the LLVM/toolchain cache in 1m 23s, then failed during `fex-ios` CMake configuration. The failure is confirmed by the run log: `aarch64_fit_native.py` could not import `packaging` or `pkg_resources`, `NeedDisabledSVE.py` tried to open `/proc/cpuinfo` on Darwin, and the resulting empty CPU string caused `string(STRIP ...)` to fail.
+- Blocker ladder rung 1: set FEX `TUNE_CPU=none` for the generic iOS ARM64 build so configuration does not probe the build host's CPU or Linux `/proc`. This avoids adding a new Python package dependency to a path that does not need host-specific tuning.
+- The `actions/cache/save` step completed successfully, so the toolchain cache save is now verified. Cache restoration on a subsequent run remains unverified. No Wine/DXMT/app product link or IPA packaging was reached.
+- Next: push this FEX configuration fix and run the cached workflow; inspect its first failure and continue.
