@@ -70,3 +70,13 @@ Fetch the completed log for run `38643156359` once and inspect the first FEX con
 **UNVERIFIED:** Madeira's clean FEX iOS build and original CMakeCache values; actual presence of `packaging`/`pkg_resources` on the historical development machine; Xcode/SDK version used for Madeira's documented FEX build; FEXCore compilation on the current macOS runner.
 
 **Next step:** Compare the pinned recipe with WinePhone's FEX build script, bootstrap, and workflow; decide which differences are needed on Darwin and whether Python dependency installation addresses the reported failure.
+
+### Step 2 complete
+
+**Done:** `77477ca` adds the line-by-line recipe comparison to `docs/MADEIRA_RECIPE.md`. The chosen CPU fix is `TUNE_CPU=none`: adding `packaging` to a venv would address only Python's version parser import, while the native-tuning scripts still open Linux `/proc/cpuinfo`. FEX iOS configure requires an explicit ARM64 processor based on `FEX/CMakeLists.txt:89-117`; the iOS host macros/options are identified as WinePhone integration choices, with `FEX_IOS_HOST_BUILD` necessity for the static-only target left **UNVERIFIED**.
+
+**Cache evidence:** GitHub reports a 1.48 GiB cache entry for the configured key. This confirms a saved entry exists, not that the runner restores it; cache restore remains **UNVERIFIED**.
+
+**Current blocker:** Darwin FEXCore compilation has not been confirmed. Run `38644632372` remains at `in_progress` from its single status check.
+
+**Next step:** Remove the no-longer-reached SVE and nonfatal syscall-probe hunks from `patches/fex-darwin.patch`, retaining the Windows-only Arm64 diagnostic guard; record exact remaining behavior.
