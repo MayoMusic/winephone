@@ -80,3 +80,13 @@ Fetch the completed log for run `38643156359` once and inspect the first FEX con
 **Current blocker:** Darwin FEXCore compilation has not been confirmed. Run `38644632372` remains at `in_progress` from its single status check.
 
 **Next step:** Remove the no-longer-reached SVE and nonfatal syscall-probe hunks from `patches/fex-darwin.patch`, retaining the Windows-only Arm64 diagnostic guard; record exact remaining behavior.
+
+### Step 3 complete
+
+**Done:** `6b9351f` reduced `patches/fex-darwin.patch` from three hunks to one. `TUNE_CPU=none` bypasses both native tuning scripts. The five syscall probes are nonfatal `check_cxx_source_compiles` checks, and the API wrapper selects its Apple branch; their Darwin runtime behavior remains **UNVERIFIED**. The retained `Arm64.cpp` guard is required because `FEX_IOS_HOST` is used in native iOS compilation while that diagnostic names Windows APIs. `git -C FEX apply --check ../patches/fex-darwin.patch` passed.
+
+**Stubs:** no new stubs were introduced. The log fallback only omits Windows memory-region metadata.
+
+**Current blocker:** FEXCore has not yet been confirmed compiling on Darwin; run `38644632372` remains unknown beyond its one `in_progress` observation.
+
+**Next step:** Add stage-only dispatch for `fex-ios`, explicitly report cache restore hit/miss, and make the stage-only path require a restored toolchain cache without running the LLVM bootstrap. Preserve the existing artifact publication gate.
