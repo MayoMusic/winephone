@@ -44,3 +44,9 @@
 
 - Run `38628817666` failed in 26 seconds at Xcode selection: the runner reported `xcode-select: error: --switch must be run as root`. Checkout succeeded; no dependency or product build was attempted.
 - Blocker ladder rung 1: updated the workflow to run `sudo xcode-select -s` and will verify the installed path in the next run.
+
+### Second macOS workflow attempt
+
+- Run `38628969464` passed Xcode selection, Homebrew setup, checksum-toolchain setup, and submodule fetch. It ran 20m 4s, then failed in the iOS LLVM build at `lib/LLVMHello.dylib`: Apple ld rejected `llvm-ios-build/lib/Transforms/Hello/LLVMHello.def` as an unknown file type.
+- Blocker ladder rung 1: configure LLVM with examples, tests, benchmarks, docs, plugins and tools disabled for the iOS target. The failing `LLVMHello` target is an example plugin, not a WinePhone runtime dependency.
+- The Xcode command reported Xcode 26.6 / iOS SDK 26.5. No Wine, FEX, DXMT or app product build was reached; no IPA exists.
