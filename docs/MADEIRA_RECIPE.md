@@ -120,3 +120,47 @@ with `WINE_BUILD="$WINE_SRC/build-macos"` (`:7`) — i.e. **`wine/build-macos`**
 - `dxmt/build-aarch64-win.txt` (aarch64-windows cross file) and `dxmt/src/winemetal/meson.build:18-25` — DXMT needs `libs/winecrt0`, `dlls/winecrt0`, `dlls/ntdll`, `dlls/dbghelp` under `aarch64-windows`, plus `tools/winebuild/winebuild`, from that tree.
 
 **UNVERIFIED:** the exact flags Madeira's development machine used for `build-macos` (not recorded anywhere in the tree); whether configure succeeds on the runner; whether the unix compiles then pass; and DXMT additionally needs that tree **built** (`make tools/winebuild` plus the `aarch64-windows` import libraries), which this increment does not do.
+
+## Step 7 — run 38651245572 (`only_stage=wine-ntdll-unix`, 2026-10-14): 31 OK / 6 FAILED
+
+The run used commit `62f3269`, so it had the `wine-macos` stage (32 of 37 compiles found `config.h`), but not the GnuTLS/FFmpeg/FreeType steps or the diagnostics added in the same working session. The six failures are four missing prerequisite trees plus one SDK field:
+
+| Translation unit | Error | Producing step |
+|---|---|---|
+| `bcrypt_unixlib`, `secur32_unixlib` | `gnutls/gnutls.h` (`wine/dlls/bcrypt/gnutls.c:34`, `wine/dlls/secur32/schannel_gnutls.c:36`) | `build/gnutls-ios/build.sh` |
+| `crypt32_unixlib` | `gnutls/pkcs12.h` (`build/crypto-unix/crypt32_unixlib_ios.c:40`) | `build/gnutls-ios/build.sh` |
+| `winegstreamer_unixlib` | `libavcodec/avcodec.h` (`winegstreamer_unixlib_ios.c:251`) | `build/ffmpeg/build.sh` |
+| `dwrite_unixlib` | `ft2build.h` (`wine/dlls/dwrite/freetype.c:31`) | `build/freetype-ios/build.sh` |
+| `server` | `server_ios.c:2582` reads `ri_page_wait_time_mach`, absent from `rusage_info_v6` in the iPhoneOS 26.5 SDK | n/a (source change) |
+
+### A. Where the include paths come from, and which path exported what
+
+`build/ntdll-unix/build.sh:20-24` defines the four prefixes as plain `$REPO_ROOT`-relative paths (`GNUTLS_PREFIX=toolchains/gnutls-ios`, `FFMPEG_PREFIX=toolchains/ffmpeg-ios`, `FREETYPE_SRC=research/freetype`, `FREETYPE_BUILD=build/freetype-ios/build`) and passes them to exactly the compiles that need them (`:170`, `:173`, `:182`, `:185`, `:216`). Those values are **identical in the full and the stage-only path** — what differed is which producing step had run:
+
+- `scripts/bootstrap.sh` builds **only** LLVM and the toolchains: it fetches the submodules (`:19-24`), downloads and SHA-256-checks llvm-mingw (`:27-43`), then configures/builds `llvm-host-build` and `llvm-ios-build` (`:66-83`). It never builds GnuTLS, FFmpeg or FreeType and never configures a Wine tree, so no bootstrap-produced prefix could exist for the stage-only path to inherit. (The `toolchains/gnutls-ios` and `toolchains/ffmpeg-ios` prefixes come from the `gnutls` and `ffmpeg` *stages*, which the full path runs at `scripts/build-ipa.sh:80-81` and the stage-only path goes straight past.)
+- FreeType had no producer anywhere: no script and no workflow step referenced `build/freetype-ios`, `research/freetype` is git-ignored (`.gitignore:113`), and `build/freetype-ios/build.sh` at HEAD refused to run without a pre-cloned tree (`:18` `[ -d "$SRC" ] || { echo "ERROR: clone freetype first (see header)"; exit 1; }`). This is the same machine-state assumption as Step 6.
+- Madeira's `docs/BUILDING.md` at `279fd0f` agrees, and shows the gap: its two first steps are GnuTLS (`:33-35`) and FFmpeg (`:38-42`), its "Inputs that are not in the repository" table (`:17-25`) lists the LLVM toolchains and Wine Mono but **no FreeType and no Wine build tree**, and `:52-54` lists the unix side before the PE side (the ordering that hides the widl prerequisite below). Madeira's `wine/build-macos` and `research/freetype` were machine state, not recipe steps.
+
+### B. Diagnostics (in the tree now)
+
+`build/ntdll-unix/build.sh:26-73` prints, before the first compile: the four prefixes and the exact `-I` flags each group of compiles gets, `present`/`MISSING` for `config.h`, the widl-generated headers, `gnutls.h`, `pkcs12.h`, `avcodec.h` (source and build), `ft2build.h` (source and build) and `libfreetype.a`, `ls toolchains`, the state of both Wine build trees, a `find` for the four third-party headers, and the toolchain cache-hit value (passed by the workflow as `WINEPHONE_TOOLCHAIN_CACHE_HIT`, `.github/workflows/build-ipa.yml:115-121`). Each failing compile already printed its source, exact command line and first 40 lines of stderr (Step 6).
+
+### C. Fixes
+
+- The stage-only path now runs the same producers as the full path: `scripts/build-ipa.sh:68-69` (`gnutls`, `ffmpeg`) before `wine-macos`/`wine-ntdll-unix` (`:70-71`).
+- FreeType is a separate, pinned build with its **own** cache key (`.github/workflows/build-ipa.yml:88-113`, key `winephone-freetype-2.13.3-…`), so it never invalidates the `~35`-minute LLVM cache (key `winephone-macos26-llvm-…`, `:56`): `build/freetype-ios/build.sh` now clones the tag itself and verifies the **commit** (the tag is annotated: `VER-2-13-3` -> tag object `534ad345…` -> commit `42608f77f20749dd6ddc9e0536788eaad70ea4b5`), which is its checksum step. Its cmake invocation is unchanged from Madeira's, so the existing consumers' paths stay valid (`build/win32u-unix/build.sh:65-70` uses `build/include` + `research/freetype/include`, merges `build/libfreetype.a`).
+- `server`: `build/ntdll-unix/server_ios.c:2579-2583` drops `pgw=` from the `[xp]` line instead of reading a member the SDK does not declare; `pin=` (from `ri_pageins`) is kept and the reason is a comment at the site.
+
+### The next wall: the widl-generated headers (not among the six)
+
+Run 38651245572 never reached this, because `wine/dlls/dwrite/freetype.c` fails on `ft2build.h` (`:31`) before `dwrite_private.h` (`:44`) is read. Once FreeType exists, two of the same compiles need headers that exist in **no** source tree:
+
+- `wine/dlls/dwrite/dwrite_private.h:24-25` includes `dwrite_3.h` and `d2d1.h`; `wine/dlls/dwrite/freetype.c:44` includes `dwrite_private.h`.
+- `wine/dlls/winegstreamer/unixlib.h:32` includes `mfobjects.h`.
+- `find wine -name dwrite_3.h -o -name d2d1.h -o -name mfobjects.h -o -name mftransform.h` finds **nothing**: only the `.idl` inputs are tracked (`wine/include/dwrite_3.idl`, `d2d1.idl`, `mfobjects.idl`, `mftransform.idl`; listed in `wine/include/Makefile.in:302`, `:115-122`, `:467`).
+- They are widl output, and **widl is itself a build product**, so configure alone cannot create them: `configure` only *writes* the rules (`wine/aclocal.m4:293` `wine_fn_config_makefile()`, driven per directory from `wine/configure.ac:2443…`), and `wine/configure:24365` `wine_fn_output_makedep()` compiles `tools/makedep.c` and runs makedep with `-i` on each generated Makefile (`:24373`). makedep gives every `include/*.idl` a `.h` target in that directory's Makefile (`wine/tools/makedep.c:2004-2009`) and invokes widl by its literal path (`:4914`), so `make -C <tree>/include` needs no top-level Makefile (this fork has none: `wine/Makefile.in` is not tracked at all).
+- Which is why Step 6's reading of `tests/host/check-wma-decoder.py:25-27` ("a **configured** Wine build tree whose include/ holds config.h and the widl-generated headers") is only true of a tree that has also been **built**, and why `build/ntdll-unix/build.sh:158` names `wine/build-arm64ec/include`: in Madeira's own order both trees were already built on the development machine. In the pipeline, `wine-pe-ntdll` (`scripts/build-ipa.sh:99`, the first `make` in a Wine tree in the pipeline, `build/wine-pe/build-ntdll.sh:20`) runs **after** `wine-ntdll-unix` (`:96`) in the full path too.
+
+`build/wine-macos/configure.sh` therefore now also generates them, after configure, in `wine/build-macos/include` — the tree every unix side already includes (`-I"$WINE_BUILD/include"`): `make -C wine/build-macos/tools/widl` (only if the binary is absent) then `make -C wine/build-macos/include`, and a `present`/`MISSING` report for all four headers. It is deliberately best-effort (a failure is printed and the stage continues) only because that keeps the diagnosis in one place: if the headers are still absent, the diagnostic above says so and the affected compile still fails loudly with its command line.
+
+**UNVERIFIED:** whether those two make invocations succeed on the runner (the widl rules, the tool build, and the need for bison/flex in the `include` rule set are read from makedep and configure, not executed — this worktree has no macOS, no bison/flex and no root, so a Wine build tree cannot be generated here); whether `make -C include` needs further generated headers first; and whether FreeType's `ft2build.h` from `research/freetype/include` is enough for `wine/dlls/dwrite/freetype.c` without the CMake build's generated headers.

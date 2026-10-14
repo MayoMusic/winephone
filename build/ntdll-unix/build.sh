@@ -11,6 +11,67 @@ APP_LIB="$REPO_ROOT/app/Madeira/libntdll_unix.a"
 
 mkdir -p "$OBJ_DIR"
 
+# Include-path prefixes this stage compiles against. They are plain
+# $REPO_ROOT-relative paths, identical in the full and the stage-only paths; the
+# trees they point at only exist if their producing step has run (see
+# scripts/build-ipa.sh and the FreeType workflow step). Printed up front so a
+# missing tree is visible before the compiles instead of being inferred from
+# "'gnutls/gnutls.h' file not found".
+CRYPTO_DIR="$REPO_ROOT/build/crypto-unix"
+GNUTLS_PREFIX="$REPO_ROOT/toolchains/gnutls-ios"
+FFMPEG_PREFIX="$REPO_ROOT/toolchains/ffmpeg-ios"
+FREETYPE_SRC="$REPO_ROOT/research/freetype"
+FREETYPE_BUILD="$REPO_ROOT/build/freetype-ios/build"
+
+echo "=== ntdll unix header diagnostic ==="
+echo "  REPO_ROOT      = $REPO_ROOT"
+echo "  WINE_BUILD     = $WINE_BUILD"
+echo "  GNUTLS_PREFIX  = $GNUTLS_PREFIX"
+echo "  FFMPEG_PREFIX  = $FFMPEG_PREFIX"
+echo "  FREETYPE_SRC   = $FREETYPE_SRC"
+echo "  FREETYPE_BUILD = $FREETYPE_BUILD"
+echo "  include flags  = -I\"$WINE_BUILD/include\" -I\"$GNUTLS_PREFIX/include\" (bcrypt/secur32/crypt32)"
+echo "                   -I\"$FFMPEG_PREFIX/include\" (winegstreamer)"
+echo "                   -I\"$FREETYPE_SRC/include\" -I\"$REPO_ROOT/wine/build-arm64ec/include\" (dwrite)"
+if [ -n "${WINEPHONE_TOOLCHAIN_CACHE_HIT:-}" ]; then
+    echo "  toolchain cache exact-key hit: $WINEPHONE_TOOLCHAIN_CACHE_HIT"
+else
+    echo "  toolchain cache exact-key hit: (not passed to this step)"
+fi
+for h in "$WINE_BUILD/include/config.h" \
+         "$WINE_BUILD/include/dwrite_3.h" \
+         "$WINE_BUILD/include/d2d1.h" \
+         "$WINE_BUILD/include/mfobjects.h" \
+         "$REPO_ROOT/wine/build-arm64ec/include/dwrite_3.h" \
+         "$GNUTLS_PREFIX/include/gnutls/gnutls.h" \
+         "$GNUTLS_PREFIX/include/gnutls/pkcs12.h" \
+         "$FFMPEG_PREFIX/include/libavcodec/avcodec.h" \
+         "$FREETYPE_SRC/include/ft2build.h" \
+         "$FREETYPE_BUILD/include/ft2build.h" \
+         "$FREETYPE_BUILD/libfreetype.a"; do
+    if [ -e "$h" ]; then echo "  present: $h"; else echo "  MISSING: $h"; fi
+done
+echo "--- ls $REPO_ROOT/toolchains ---"
+ls -la "$REPO_ROOT/toolchains" 2>&1 || echo "  (no toolchains directory)"
+echo "--- configured/generated Wine trees ---"
+for t in "$WINE_BUILD" "$REPO_ROOT/wine/build-arm64ec"; do
+    if [ -d "$t" ]; then
+        echo "  $t: $(test -f "$t/include/config.h" && echo configured || echo 'no config.h'), "\
+             "$(ls "$t/include"/*.h 2>/dev/null | wc -l | tr -d ' ') headers in include/"
+    else
+        echo "  $t: absent"
+    fi
+done
+echo "--- headers under toolchains/, research/freetype, build/freetype-ios ---"
+find "$REPO_ROOT/toolchains" "$FREETYPE_SRC" "$FREETYPE_BUILD" \
+     \( -name gnutls.h -o -name pkcs12.h -o -name avcodec.h -o -name ft2build.h \) \
+     2>/dev/null | head -40 || true
+echo "--- widl-generated headers under wine/build-* ---"
+find "$REPO_ROOT/wine" -maxdepth 3 -path "*/build-*/include/*" \
+     \( -name dwrite_3.h -o -name d2d1.h -o -name mfobjects.h -o -name mftransform.h \) \
+     2>/dev/null | head -20 || true
+echo "=== end diagnostic ==="
+
 SUCCEEDED=0
 FAILED=0
 FAILED_FILES=""
@@ -70,8 +131,6 @@ compile_one() {
 # in one archive) and registered by name in virtual_ios.c's
 # load_builtin_unixlib. GnuTLS-backed libs add ios_gnutls_shim.h to
 # route dlopen/dlsym at the static symtab (gnutls_symtab_ios.c).
-CRYPTO_DIR="$REPO_ROOT/build/crypto-unix"
-GNUTLS_PREFIX="$REPO_ROOT/toolchains/gnutls-ios"
 compile_unixlib() {
     local src=$1 name=$2 prefix=$3
     shift 3
@@ -120,7 +179,7 @@ compile_unixlib "$WINE_SRC/dlls/secur32/schannel_gnutls.c" "secur32_unixlib" "se
 # dwrite.h/dwrite_3.h are widl-generated and only exist in the arm64ec
 # build tree, so that include dir is named explicitly here.
 compile_unixlib "$BUILD_DIR/dwrite_freetype_ios.c" "dwrite_unixlib" "dwrite" \
-    -I"$WINE_SRC/dlls/dwrite" -I"$REPO_ROOT/research/freetype/include" \
+    -I"$WINE_SRC/dlls/dwrite" -I"$FREETYPE_SRC/include" \
     -I"$REPO_ROOT/wine/build-arm64ec/include"
 compile_unixlib "$CRYPTO_DIR/crypt32_unixlib_ios.c" "crypt32_unixlib" "crypt32" \
     -I"$WINE_SRC/dlls/crypt32" -I"$GNUTLS_PREFIX/include" \
@@ -153,7 +212,6 @@ compile_unixlib "$BUILD_DIR/dnsapi_unixlib_ios.c" "dnsapi_unixlib" "dnsapi" \
 # libavformat.  FFmpeg comes from build/ffmpeg/build.sh (LGPL configuration).
 # The widl-generated mfobjects.h/mftransform.h that unixlib.h pulls in only
 # exist in a configured build tree's include dir, which $WINE_BUILD already is.
-FFMPEG_PREFIX="$REPO_ROOT/toolchains/ffmpeg-ios"
 compile_unixlib "$BUILD_DIR/winegstreamer_unixlib_ios.c" "winegstreamer_unixlib" "winegstreamer" \
     -I"$WINE_SRC/dlls/winegstreamer" -I"$FFMPEG_PREFIX/include"
 # MADEIRA ml1990: the wg_parser's H.264/HEVC (VideoToolbox) and AAC

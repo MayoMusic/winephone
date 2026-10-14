@@ -1,18 +1,44 @@
 #!/bin/bash
-# Build freetype static for iOS arm64 — consumed by build/win32u-unix/build.sh,
-# which compiles freetype_ios.c against these headers and merges
+# Build freetype static for iOS arm64 — consumed by build/win32u-unix/build.sh
+# and build/ntdll-unix/build.sh (whose dwrite override includes Wine's
+# dlls/dwrite/freetype.c). Those compile against these headers and merge
 # build/libfreetype.a into libwin32u_unix.a (no Xcode project changes).
 #
-# Source: shallow clone of freetype 2.13.3 in research/freetype
-#   git clone --depth 1 --branch VER-2-13-3 https://github.com/freetype/freetype.git research/freetype
+# Source: freetype, shallow-cloned at tag VER-2-13-3 into research/freetype.
+# That is Madeira's recipe (the original header here said
+#   git clone --depth 1 --branch VER-2-13-3 ... research/freetype
+# and research/freetype is a build tree, not tracked). The checkout is then
+# verified against the pinned commit, which is the checksum step:
+#
+#   tag ref VER-2-13-3 -> tag OBJECT 534ad3456055ee1f65ecde3bcf22a656a31514d1
+#                      -> commit     42608f77f20749dd6ddc9e0536788eaad70ea4b5
+#
+# (The tag is annotated: `git ls-remote --tags` prints the tag object, and a
+# `git clone --branch VER-2-13-3` checks out the commit above. Verify the
+# commit, never the tag-object sha.)
+#
 # All optional deps disabled — fonts are plain TTFs from wine/fonts/.
-set -e
+set -euo pipefail
 
 BUILD_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$BUILD_DIR/../.." && pwd)"
 SRC="$REPO_ROOT/research/freetype"
 
-[ -d "$SRC" ] || { echo "ERROR: clone freetype first (see header)"; exit 1; }
+FREETYPE_TAG=VER-2-13-3
+FREETYPE_COMMIT=42608f77f20749dd6ddc9e0536788eaad70ea4b5
+FREETYPE_URL=https://github.com/freetype/freetype.git
+
+if [ ! -d "$SRC/.git" ]; then
+    echo "=== cloning freetype $FREETYPE_TAG ==="
+    git clone --depth 1 --branch "$FREETYPE_TAG" "$FREETYPE_URL" "$SRC"
+fi
+
+GOT="$(git -C "$SRC" rev-parse HEAD)"
+if [ "$GOT" != "$FREETYPE_COMMIT" ]; then
+    echo "ERROR: research/freetype HEAD is $GOT, expected pinned commit $FREETYPE_COMMIT" >&2
+    exit 1
+fi
+echo "freetype source verified at $GOT"
 
 cmake -S "$SRC" -B "$BUILD_DIR/build" -G "Unix Makefiles" \
   -DCMAKE_SYSTEM_NAME=iOS \

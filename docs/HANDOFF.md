@@ -132,3 +132,22 @@ Fetch the completed log for run `38643156359` once and inspect the first FEX con
 **UNVERIFIED:** the actual failing error for `bb733f6` (log not read); whether removing `FEX_IOS_HOST` lets FEXCore configure and compile on Darwin; cache restore; IPA/device behaviour.
 
 **Next step:** user pastes the failed log; record its first error and full `error:` list here, then commit the fix as the single non-`[skip ci]` change and read the one resulting run.
+
+### Run 38651245572 recorded (2026-10-14)
+
+**Input:** the user reported run `38651245572` (`only_stage=wine-ntdll-unix`, commit `62f3269`) as `31 OK / 6 FAILED` — four missing prerequisite trees plus one SDK field. This agent still cannot read Actions logs (no `gh`/token, REST 403) or dispatch a workflow, so these are their report, not a log this agent read.
+
+**Done in this change set (`[skip ci]`, one commit):**
+
+- the `only_stage=wine-ntdll-unix` path runs the `gnutls` and `ffmpeg` stages before `wine-macos`/`wine-ntdll-unix` (`scripts/build-ipa.sh:68-69`), so `toolchains/gnutls-ios` and `toolchains/ffmpeg-ios` exist like they do in the full path;
+- FreeType is a separate, pinned build with its **own** cache key (`.github/workflows/build-ipa.yml:88-113`) — `build/freetype-ios/build.sh` clones tag `VER-2-13-3` and verifies the annotated tag's commit `42608f77f20749dd6ddc9e0536788eaad70ea4b5` — leaving the `winephone-macos26-llvm-…` cache key (and the `~35`-minute LLVM build) untouched;
+- `build/ntdll-unix/build.sh:26-73` prints the full include-path diagnostic before compiling, including the toolchain cache-hit value (`WINEPHONE_TOOLCHAIN_CACHE_HIT`, passed by the workflow);
+- `server_ios.c` no longer reads `ri_page_wait_time_mach` (absent from `rusage_info_v6` in the iPhoneOS 26.5 SDK): the statistic is dropped from the `[xp]` line and `pin=` is kept;
+- the wall after these six is recorded as B-010: `dwrite_unixlib` and `winegstreamer_unixlib` need the widl-generated `dwrite_3.h`/`d2d1.h`/`mfobjects.h`, which exist only in a *built* Wine tree (`wine/tools/makedep.c:2004-2009`; widl is a build product), and `build/wine-macos/configure.sh` now generates them after configure — best-effort and logged;
+- `docs/MADEIRA_RECIPE.md` Step 7 records the comparison with Madeira's `docs/BUILDING.md` at `279fd0f` (which has GnuTLS and FFmpeg as its first two steps at `:33-42` but no FreeType and no Wine build tree among its inputs at `:17-25`), plus `BLOCKERS.md` B-008/B-009/B-010 and `PROGRESS.md`.
+
+**Not touched:** FEX (`build/fex-ios/build.sh`, `patches/fex-darwin.patch` stay at `bb733f6`), `DECISIONS.md`, the `WINEPHONE_BINARY_RELEASE_CLEARED` release gate.
+
+**Current blocker:** the stage cannot be re-run from this worktree (no dispatch, no logs), and the new make-based header generation plus the unix compiles are **UNVERIFIED**.
+
+**Next step:** dispatch `only_stage=wine-ntdll-unix` once more and paste (a) the `ntdll unix header diagnostic` block, (b) the `widl-generated public headers` block (or the `make -C include` failure tail), and (c) the `Results:`/`Failed:` line. Those three decide whether the generation works and whether the compiles then pass.

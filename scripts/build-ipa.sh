@@ -60,6 +60,13 @@ fi
 
 if [[ "$ONLY_STAGE" == wine-ntdll-unix ]]; then
   export PATH="$ROOT/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin:$PATH"
+  # build/ntdll-unix/build.sh compiles bcrypt/secur32/crypt32/winegstreamer
+  # against the GnuTLS and FFmpeg prefixes their stages produce
+  # (toolchains/gnutls-ios, toolchains/ffmpeg-ios). Those are not part of the
+  # LLVM toolchain cache, so the stage-only path must build them too — the same
+  # stages the full path runs.
+  run_stage gnutls bash "$ROOT/build/gnutls-ios/build.sh"
+  run_stage ffmpeg bash "$ROOT/build/ffmpeg/build.sh"
   run_stage wine-macos bash "$ROOT/build/wine-macos/configure.sh"
   run_stage wine-ntdll-unix bash "$ROOT/build/ntdll-unix/build.sh"
   echo "Build duration: $((SECONDS-start)) seconds"

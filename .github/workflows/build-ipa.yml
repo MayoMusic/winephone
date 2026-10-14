@@ -81,11 +81,45 @@ jobs:
             toolchains/llvm-mingw-20260421-ucrt-macos-universal
           key: winephone-macos26-llvm-8dfdcc7b7bf66834a761bd8de445840ef68e4d1a-llvm-mingw-20260421-v1
 
+      # FreeType is not built by bootstrap and is not in the LLVM toolchain
+      # cache; it gets its own key so this never invalidates the ~35-minute LLVM
+      # cache. build/ntdll-unix/build.sh needs it for dwrite and
+      # build/win32u-unix/build.sh links libfreetype.a into libwin32u_unix.a.
+      - name: Cache pinned FreeType
+        id: freetype-cache
+        uses: actions/cache@a7833574556fa59680c1b7cb190c1735db73ebf0
+        with:
+          path: |
+            research/freetype
+            build/freetype-ios/build
+          key: winephone-freetype-2.13.3-42608f77f20749dd6ddc9e0536788eaad70ea4b5-v1
+
+      - name: Report FreeType cache restore
+        shell: bash
+        run: |
+          echo "Pinned FreeType cache exact-key hit: ${{ steps.freetype-cache.outputs.cache-hit }}"
+
+      - name: Build FreeType for iOS
+        if: steps.freetype-cache.outputs.cache-hit != 'true'
+        run: bash build/freetype-ios/build.sh
+
+      - name: Save FreeType cache after build
+        if: steps.freetype-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809
+        with:
+          path: |
+            research/freetype
+            build/freetype-ios/build
+          key: winephone-freetype-2.13.3-42608f77f20749dd6ddc9e0536788eaad70ea4b5-v1
+
       - name: Build and package unsigned IPA
         run: bash scripts/build-ipa.sh artifacts
         env:
           WINEPHONE_SKIP_BOOTSTRAP: '1'
           WINEPHONE_ONLY_STAGE: ${{ inputs.only_stage || 'all' }}
+          # Printed by build/ntdll-unix/build.sh's header diagnostic: a
+          # stage-only dispatch is required to have the pinned toolchain cache.
+          WINEPHONE_TOOLCHAIN_CACHE_HIT: ${{ steps.toolchain-cache.outputs.cache-hit }}
 
       - name: Upload unsigned IPA and hash
         if: vars.WINEPHONE_BINARY_RELEASE_CLEARED == 'true'
