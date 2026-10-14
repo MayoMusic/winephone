@@ -148,9 +148,8 @@ build/madeira-d3d12/out-ios/
 build/madeira-d3d12/out-pe/
 research/remote-metal/host/rmetald.*
 
-# Apple Metal Shader Converter dynamic library: TRACKED (decision 2026-09-16).
-# Apple's installer agreement 2.B permits distributing it solely for shader
-# conversion, which is its only use here; see app/Madeira/d3d12/NOTICE.txt.
+# WinePhone removes the Apple Metal Shader Converter binary and D3D12 runtime
+# from the release tree pending a separate license and feature review.
 
 # Licence copies generated into the bundle by build/stage-licenses.sh (from COPYING and LICENSE-EXCEPTION.md)
 app/Madeira/licenses/LICENSE-MADEIRA-GPL-3.0.txt
@@ -169,3 +168,8 @@ app/Madeira/arm64ec-windows/dock-notices.txt
 
 # faultrep.dll: build/faultrep/build.sh (its install goes into the tracked farm)
 build/faultrep/out/
+
+# WinePhone CI output
+artifacts/
+__pycache__/
+*.py[cod]

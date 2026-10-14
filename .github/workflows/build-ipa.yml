@@ -1,0 +1,73 @@
+name: Build unsigned iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-ipa:
+    name: Track A sideload JIT build
+    # The project requires Xcode, Metal tooling, and the iOS SDK.
+    runs-on: macos-26
+    timeout-minutes: 360
+    steps:
+      - name: Checkout pinned source tree
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3
+        with:
+          submodules: false
+          fetch-depth: 1
+
+      - name: Select Xcode 26.6
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Install pinned build tools
+        run: |
+          brew install cmake ninja meson bison
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+
+      - name: Cache pinned toolchains
+        uses: actions/cache@a7833574556fa59680c1b7cb190c1735db73ebf0
+        with:
+          path: |
+            toolchains/llvm-project
+            toolchains/llvm-host-build
+            toolchains/llvm-ios-build
+            toolchains/llvm-mingw-20260421-ucrt-macos-universal
+          key: winephone-macos26-llvm-8dfdcc7b7bf66834a761bd8de445840ef68e4d1a-llvm-mingw-20260421-v1
+
+      - name: Build and package unsigned IPA
+        run: bash scripts/build-ipa.sh artifacts
+
+      - name: Upload unsigned IPA and hash
+        if: vars.WINEPHONE_BINARY_RELEASE_CLEARED == 'true'
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        with:
+          name: WinePhone-unsigned-IPA
+          path: artifacts/WinePhone-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build evidence
+        if: vars.WINEPHONE_BINARY_RELEASE_CLEARED == 'true'
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        with:
+          name: WinePhone-build-evidence
+          path: |
+            artifacts/SHA256SUMS
+            artifacts/build-environment.txt
+            artifacts/Payload/Madeira.app/Info.plist
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Report binary distribution gate
+        if: vars.WINEPHONE_BINARY_RELEASE_CLEARED != 'true'
+        run: echo "IPA validation completed, but artifact publication is gated pending license/relink review. See LICENSES/PROVENANCE.md."

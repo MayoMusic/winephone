@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "entries": [],
+  "status_values": [
+    "Untested",
+    "Boots",
+    "Menu",
+    "Playable",
+    "Perfect",
+    "Unsupported-DRM",
+    "Unsupported-hardware"
+  ],
+  "required_evidence": [
+    "game_title",
+    "game_version_and_source",
+    "drm_assessment",
+    "device_model",
+    "ios_version",
+    "winephone_commit",
+    "profile_and_backend_versions",
+    "run_duration_seconds",
+    "fps_or_frame_time_method",
+    "logs_or_crash_signature"
+  ]
+}

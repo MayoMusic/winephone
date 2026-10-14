@@ -121,76 +121,9 @@ compile_madeira_c() {
     fi
 }
 
-# ---- madeira-d3d12 M1 canary (optional) -------------------------------------
-# Compiled into this library so the app can run the shader-converter gate
-# in-process. Guarded: the converter package is a locally supplied dependency
-# and the DXMT build must not start failing when it is absent.
-compile_objcxx_arc() {
-    local src=$1 name=$2 extra="${3:-}"
-    # MADEIRA_ONLY=<name>: recompile one object only.
-    if [ -n "${MADEIRA_ONLY:-}" ] && [ "$name" != "$MADEIRA_ONLY" ]; then return 0; fi
-    printf "  %-40s " "$name"
-    if xcrun -sdk iphoneos clang++ $COMMON_FLAGS -std=c++20 -fobjc-arc -x objective-c++ $extra \
-        -c "$src" -o "$OBJ_DIR/$name.o" 2>"$OBJ_DIR/$name.err"; then
-        echo "OK"; SUCCEEDED=$((SUCCEEDED+1))
-    else
-        echo "FAILED"; FAILED=$((FAILED+1)); FAILED_FILES="$FAILED_FILES $name"
-    fi
-}
-if [[ -f "$BUILD_DIR/../madeira-d3d12/deps.sh" ]] && \
-   source "$BUILD_DIR/../madeira-d3d12/deps.sh"; then
-    echo "=== madeira-d3d12 canary (Objective-C++, Metal Shader Converter) ==="
-    compile_objcxx_arc "$REPO_ROOT/madeira-d3d12/tests/native/msc_canary.mm" \
-                       msc_canary "-DIR_PRIVATE_IMPLEMENTATION -I$MSC_INCLUDE"
-    # The shader caches' converter identity (madeira_ir_unix.mm, MAD_SC_BUILD):
-    # a hash of everything that shapes a conversion -- the service and the IR
-    # ABI, this script (its compiler flags), DXMT's AIR compiler and DXBC
-    # parser, LLVM's configuration, the converter's headers and iOS library.
-    # A build that changes none of them keeps the device's shader cache instead
-    # of converting every shader again.
-    converter_id_inputs() {
-        local f x
-        for f in "$REPO_ROOT/madeira-d3d12/src/unix" "$REPO_ROOT/madeira-d3d12/src/madeira_ir_abi.h" \
-                 "$BUILD_DIR/build.sh" "$DXMT_SRC/airconv" "$DXMT_ROOT/libs" \
-                 "$LLVM_BUILD/include/llvm/Config/llvm-config.h" "$MSC_INCLUDE" "$MSC_LIB_IOS"; do
-            [ -e "$f" ] || { echo "absent ${f#"$REPO_ROOT"/}"; continue; }
-            find "$f" -type f | LC_ALL=C sort | while read -r x; do
-                echo "$(shasum -a 256 < "$x" | cut -c1-64) ${x#"$REPO_ROOT"/}"
-            done
-        done
-    }
-    CONVERTER_ID=$(converter_id_inputs | shasum -a 256 | cut -c1-16)
-    echo "  shader cache converter identity $CONVERTER_ID"
-    # The runtime conversion service reached from the D3D12 runtime through
-    # winemetal's unix call. Deliberately NOT defining IR_PRIVATE_IMPLEMENTATION
-    # here: the converter's runtime header emits its bind points and helper
-    # bodies only where that macro is set, and defining it in a second
-    # translation unit gives duplicate symbols. The canary owns the one copy.
-    # ml1008: also needs airconv_public.h -- shader-model-5.x DXBC goes to the
-    # in-tree AIR compiler, which is linked into this same archive, so the shim
-    # includes the compiler's real header rather than restating its structs.
-    compile_objcxx_arc "$REPO_ROOT/madeira-d3d12/src/unix/madeira_ir_unix.mm" \
-                       madeira_ir_unix "-I$MSC_INCLUDE -I$REPO_ROOT/madeira-d3d12/src $INCLUDES $INCLUDES_DIRECTX -DMADEIRA_IR_CONVERTER_ID=\"$CONVERTER_ID\""
-    # ml1011: the input-layout resolver, plain C++ because DXBCParser's signature
-    # reader includes a Windows shim whose BOOL clashes with Objective-C's.
-    compile_cxx "$REPO_ROOT/madeira-d3d12/src/unix/madeira_sm5_ia.cpp" \
-                madeira_sm5_ia "-I$REPO_ROOT/madeira-d3d12/src"
-    # ml1149: AMD AGS 64-bit atomics -> native SM6.6 atomics, a DXIL rewrite on
-    # the LLVM 15 that airconv already links (bitcode reader + writer).
-    compile_cxx "$REPO_ROOT/madeira-d3d12/src/unix/madeira_ags.cpp" madeira_ags
-    # madeira-bcd: the packed shader cache (madeira.cfg d3d12-shader-pack),
-    # plain C so tests/host/check-shader-pack.py builds and runs it on Linux.
-    compile_c "$REPO_ROOT/madeira-d3d12/src/unix/madeira_sc_pack.c" madeira_sc_pack
-else
-    # Without madeira_ir_unix every D3D12 shader fails to convert (DXIL and DXBC
-    # alike), so an app built past this point cannot run a D3D12 game. deps.sh
-    # printed why; stop unless the caller explicitly accepts that.
-    echo "=== madeira-d3d12 conversion service NOT BUILT: D3D12 games will not work ===" >&2
-    if [ "${MADEIRA_ALLOW_NO_D3D12:-0}" != "1" ]; then
-        echo "    Fix the error above, or set MADEIRA_ALLOW_NO_D3D12=1 to build without D3D12." >&2
-        exit 1
-    fi
-fi
+# WinePhone's release build intentionally omits the D3D12 conversion service.
+# It depends on Apple's Metal Shader Converter and its license has not been
+# cleared for our source/binary distribution. D3D12 titles are unsupported.
 
 echo "=== winemetal unix (Objective-C) ==="
 compile_objc "$DXMT_SRC/winemetal/unix/winemetal_unix.c" winemetal_unix
@@ -343,5 +276,10 @@ if [ -f "$COMBINED" ]; then
     APP_COPY="$REPO_ROOT/app/Madeira/libdxmt_combined.a"
     if [ -f "$APP_COPY" ]; then cp "$COMBINED" "$APP_COPY"; echo "Staged: $APP_COPY"; fi
 else
-    echo "NOTE: $COMBINED absent; the app links that file, so build it before deploying."
+    echo "=== Creating libdxmt_combined.a from this clean build ==="
+    xcrun -sdk iphoneos libtool -static -o "$COMBINED" "$OBJ_DIR"/*.o "$LLVM_BUILD"/lib/*.a
+    xcrun -sdk iphoneos ranlib "$COMBINED"
+    APP_COPY="$REPO_ROOT/app/Madeira/libdxmt_combined.a"
+    cp "$COMBINED" "$APP_COPY"
+    echo "Built and staged: $APP_COPY ($(wc -c < "$APP_COPY" | tr -d ' ') bytes)"
 fi
