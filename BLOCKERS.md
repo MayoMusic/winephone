@@ -33,10 +33,10 @@
 
 ## B-006: FEX iOS configure assumes Linux host probes
 
-- **Evidence:** GitHub Actions run `38637082925` completed LLVM/toolchain bootstrap and cache save, then FEX's `aarch64_fit_native.py` and `NeedDisabledSVE.py` failed because Python packaging modules were absent and `/proc/cpuinfo` does not exist on Darwin. The failed empty CPU string stopped CMake at `FEX/CMakeLists.txt:529`.
-- **Impact:** The IPA build has not passed FEX configuration; no product link or IPA exists.
-- **Next path:** Set `TUNE_CPU=none` for the generic iOS ARM64 build and rerun the cached workflow.
-- **Status:** Active; mitigation committed locally and pending push.
+- **Evidence:** GitHub Actions run `38637082925` completed bootstrap/cache and failed FEX configure after `NeedDisabledSVE.py` attempted `/proc/cpuinfo`; its `aarch64_fit_native.py` import failure left the CPU string empty for CMake `string(STRIP ...)`. The five `HAS_SYSCALL_*` messages are optional compile probes, not by themselves fatal. Exact FEX source pin: `f59cab95659e8add0c88f0c76ec1cf483c536dbf`.
+- **Impact:** No Darwin configure, FEXCore compile, IPA link/package, or device test is proven.
+- **Next path:** The iOS target uses generic `TUNE_CPU=none`; `patches/fex-darwin.patch` handles the SVE missing-proc path and guards Linux-only syscall probes. Confirm once in the macOS workflow, then address the first compile error.
+- **Status:** Active; source-level patch validated against pinned FEX and pending push/CI confirmation.
 
 ## B-005: License/provenance review needed before public binary release
 

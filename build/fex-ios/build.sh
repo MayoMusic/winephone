@@ -5,6 +5,13 @@
 set -eu
 R="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 B="$R/FEX/build-ios"
+PATCH="$R/patches/fex-darwin.patch"
+# Keep iOS adaptations as a reviewable WinePhone patch, not edits to the FEX
+# submodule checkout. The reverse check makes a repeated local build harmless.
+if ! git -C "$R/FEX" apply --reverse --check "$PATCH" >/dev/null 2>&1; then
+    git -C "$R/FEX" apply --check "$PATCH"
+    git -C "$R/FEX" apply "$PATCH"
+fi
 if [ ! -f "$B/CMakeCache.txt" ]; then
     cmake -S "$R/FEX" -B "$B" -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_SYSTEM_PROCESSOR=arm64 -DCMAKE_OSX_ARCHITECTURES=arm64 \
         -DCMAKE_OSX_SYSROOT=iphoneos -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 -DCMAKE_BUILD_TYPE=Release \

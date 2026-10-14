@@ -1,0 +1,73 @@
+diff --git a/FEXHeaderUtils/CMakeLists.txt b/FEXHeaderUtils/CMakeLists.txt
+--- a/FEXHeaderUtils/CMakeLists.txt
++++ b/FEXHeaderUtils/CMakeLists.txt
+@@ -1,6 +1,8 @@
+ add_library(FEXHeaderUtils INTERFACE)
+ 
+ # Check for syscall support here
++if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
++
+ check_cxx_source_compiles("
+   #include <sched.h>
+   int main() {
+@@ -57,4 +59,12 @@ if (HAS_SYSCALL_RENAMEAT2)
+   target_compile_definitions(FEXHeaderUtils INTERFACE HAS_SYSCALL_RENAMEAT2=1)
+ endif()
+ 
++else()
++  # Linux syscalls are not available on Darwin or iOS. The public wrappers in
++  # Syscalls.h select the pthread-based Apple implementations on those hosts.
++  target_compile_definitions(FEXHeaderUtils INTERFACE
++    HAS_SYSCALL_GETCPU=0 HAS_SYSCALL_GETTID=0 HAS_SYSCALL_TGKILL=0
++    HAS_SYSCALL_STATX=0 HAS_SYSCALL_RENAMEAT2=0)
++endif()
++
+ target_include_directories(FEXHeaderUtils INTERFACE .)
+diff --git a/Scripts/NeedDisabledSVE.py b/Scripts/NeedDisabledSVE.py
+--- a/Scripts/NeedDisabledSVE.py
++++ b/Scripts/NeedDisabledSVE.py
+@@ -6,12 +6,25 @@
+ # Check for the handful of Cortex CPUs that support SVE in hardware, but are disabled
+ # in software.
+ import re
++import platform
++import subprocess
+ import sys
+ 
+ def GetCPUFeatures():
+-    File = open("/proc/cpuinfo", "r")
+-    Lines = File.readlines()
+-    File.close()
++    try:
++        with open("/proc/cpuinfo", "r") as File:
++            Lines = File.readlines()
++    except FileNotFoundError:
++        # Darwin has no /proc. Query the public ARM feature sysctl instead.
++        if platform.system() == "Darwin":
++            try:
++                Result = subprocess.run(
++                    ["sysctl", "-n", "hw.optional.arm.FEAT_SVE"],
++                    check=True, capture_output=True, text=True)
++                return ["sve"] if Result.stdout.strip() == "1" else []
++            except (FileNotFoundError, subprocess.CalledProcessError):
++                return []
++        return []
+ 
+     for Line in Lines:
+         if "Features" in Line:
+@@ -35,7 +48,14 @@ def IsAffectedSnapdragon():
+ def IsAffectedSnapdragon():
+     cpuinfo = []
+ 
+-    with open("/proc/cpuinfo") as cpuinfo_file:
++    try:
++        cpuinfo_file = open("/proc/cpuinfo")
++    except FileNotFoundError:
++        # The Snapdragon MIDR table requires Linux's CPU implementer/part IDs.
++        # Darwin uses the SVE feature sysctl above and does not expose these IDs.
++        return False
++
++    with cpuinfo_file:
+         current_implementer = 0
+         current_part = 0
+         for line in cpuinfo_file:

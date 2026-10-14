@@ -41,7 +41,27 @@ No new stub implementation has been added. In particular, WinePhone's Darwin/Win
 
 ### Result
 
-The named configure failure has a narrow source-level fix: disable build-host CPU auto-tuning for the generic iOS ARM64 target and make the SVE helper tolerate missing `/proc`, querying `hw.optional.arm.FEAT_SVE` on Darwin when available. The syscall checks are optional feature probes and should be guarded so Darwin records all five Linux syscall capabilities as unavailable instead of attempting Linux-oriented detection. Patch applicability can be tested against the exact submodule commit on this host; actual Darwin configuration and compile behavior require the configured macOS GitHub runner.
+The named configure failure has a narrow source-level fix: the iOS build command disables build-host CPU auto-tuning with `-DTUNE_CPU=none` (`build/fex-ios/build.sh:16`, parent commit `10ef48c`), and the WinePhone patch below makes the SVE helper tolerate missing `/proc`, querying `hw.optional.arm.FEAT_SVE` on Darwin when available. The syscall checks are optional feature probes; the patch guards them so Darwin records all five Linux syscall capabilities as unavailable instead of attempting Linux-oriented detection. Patch applicability can be tested against the exact submodule commit on this host; actual Darwin configuration and compile behavior require the configured macOS GitHub runner.
 
 **Unverified:** Apple's `hw.optional.arm.FEAT_SVE` availability/value on the selected macOS runner. Verify by running `sysctl -n hw.optional.arm.FEAT_SVE` there; absence is handled as no SVE feature by the patch.
+
+## Step 2 — Darwin configure patch
+
+**Change:** `patches/fex-darwin.patch` is applied to the pinned FEX checkout by `build/fex-ios/build.sh` before CMake runs. It is a patch series artifact outside the submodule; no vendored FEX source is committed as an in-place edit. The script checks whether the patch is already applied so repeated local invocations remain safe.
+
+**Patch behavior:**
+
+- `NeedDisabledSVE.py` catches missing `/proc/cpuinfo`; on Darwin it queries `sysctl -n hw.optional.arm.FEAT_SVE`. Missing/unsupported sysctl returns an empty feature list, and absent `/proc` means no Snapdragon MIDR table match.
+- `FEXHeaderUtils/CMakeLists.txt` runs getcpu/gettid/tgkill/statx/renameat2 feature probes only for `CMAKE_SYSTEM_NAME=Linux`. Other systems define all five `HAS_SYSCALL_*` values as false; the Apple-specific pthread wrappers are already selected by `Syscalls.h`.
+- The iOS FEX build passes `TUNE_CPU=none`, avoiding both Linux `/proc/cpuinfo` scripts and host-specific CPU tuning during an ARM64 cross-build.
+
+**Verification on this Windows host:** `git -C FEX apply --check ../patches/fex-darwin.patch` passed against FEX commit `f59cab95659e8add0c88f0c76ec1cf483c536dbf`. The patch was temporarily applied and reversed to run the helper with mocked Darwin/sysctl results; positive SVE, negative SVE, and missing-proc paths passed. This does not prove CMake configures or FEXCore compiles on Darwin. A local Xcode/iOS SDK is unavailable.
+
+## Step 3 — static FEXCore boundary and outstanding stubs
+
+The existing `build/fex-ios/build.sh` requests static targets `FEXCore` and `FEXCore_Base` only. The pinned root `FEX/CMakeLists.txt:581-596` excludes `Source/` for Apple, which excludes the Linux syscall-emulation executable, its Linux host syscalls, and the FEX ELF guest loader. `BUILD_THUNKS=OFF` excludes Wine/Windows thunks. The chosen static target includes x86 decode/IR/JIT code and its base utilities; the FEX header/IR generators and support libraries remain required dependencies.
+
+**Stub inventory:** no new FEX stub bodies are added in this step. The excluded Linux syscall emulator and ELF loader are omitted rather than replaced; FEXCore is a library and is not a standalone guest runner. Guest syscall delivery must be supplied by the Wine integration callback. Linux-specific facilities still referenced by FEXCore utilities include `/proc/self/maps` in `FEX/FEXCore/Source/Utils/Allocator.cpp:231-233` and Linux syscall-number emission for guest `getcpu` in `FEX/FEXCore/Source/Interface/Core/JIT/MiscOps.cpp:275-281`; whether iOS avoids or replaces those paths is not yet demonstrated. These are next compile/integration blockers, not claimed stubs.
+
+**Unverified:** the FEXCore-only target completes on the selected macOS/iOS SDK. The active CI run from parent commit `10ef48c` predates patch application and is not used as evidence for this step. No Fibonacci execution test or iOS debugger-attached JIT test has been run. The latter remains explicitly unverified; verify on the iPhone 17 with the selected iOS and sideload debugger tooling after an IPA exists.
 
