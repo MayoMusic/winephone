@@ -25,7 +25,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
+          sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
 
@@ -71,3 +71,4 @@ jobs:
       - name: Report binary distribution gate
         if: vars.WINEPHONE_BINARY_RELEASE_CLEARED != 'true'
         run: echo "IPA validation completed, but artifact publication is gated pending license/relink review. See LICENSES/PROVENANCE.md."
+

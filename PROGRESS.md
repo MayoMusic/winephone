@@ -39,3 +39,8 @@
 - User confirmed `gh auth login`; `gh auth status` reports active account `MayoMusic` with repo/workflow scopes. Created public repository `https://github.com/MayoMusic/winephone`.
 - Reviewed root `THIRD-PARTY-NOTICES.md`, `docs/LICENSING.md`, `wine/LICENSE-MADEIRA.md` (as recorded by the provenance audit), and the LGPL dependency inventory. The project itself records unresolved conflict and clean recipient relink/re-sign/install test. Binary release is therefore **not cleared**; no `WINEPHONE_BINARY_RELEASE_CLEARED` variable will be set. Workflow artifact upload remains gated.
 - No code or IPA has yet been pushed or built in CI at this point.
+
+### First macOS workflow attempt
+
+- Run `38628817666` failed in 26 seconds at Xcode selection: the runner reported `xcode-select: error: --switch must be run as root`. Checkout succeeded; no dependency or product build was attempted.
+- Blocker ladder rung 1: updated the workflow to run `sudo xcode-select -s` and will verify the installed path in the next run.
