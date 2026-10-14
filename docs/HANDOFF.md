@@ -1,0 +1,46 @@
+# WinePhone handoff — FEX Darwin configure blocker
+
+## Current goal
+
+Continue the existing WinePhone Track A sideload/JIT build: use Madeira as the pinned base, build on the GitHub macOS runner, and advance toward an unsigned IPA. The repo is public at <https://github.com/MayoMusic/winephone>. No IPA or device/game test is proven.
+
+## Fixed so far
+
+- `10ef48c` — sets `TUNE_CPU=none` for the generic ARM64 iOS FEX build, avoiding host-native tuning and its Linux `/proc/cpuinfo`/Python version helper path.
+- `92329ec` — records the pinned FEX Darwin dependency audit in `docs/RE_NOTES.md`.
+- `d218a37` — adds `patches/fex-darwin.patch` and applies it from `build/fex-ios/build.sh` before FEX CMake configuration. The patch tolerates missing `/proc/cpuinfo` in `NeedDisabledSVE.py`, queries `sysctl -n hw.optional.arm.FEAT_SVE` on Darwin, and runs the five `HAS_SYSCALL_*` configure probes only on Linux, setting them false on other systems.
+- Patch applicability was checked against FEX `f59cab95659e8add0c88f0c76ec1cf483c536dbf`. A local mocked helper check passed positive SVE, negative SVE, and missing-proc paths. These are source/patch checks, not a Darwin configure/build test.
+
+## Last confirmed blocker
+
+The last completed failing run is [38637082925](https://github.com/MayoMusic/winephone/actions/runs/38637082925), built from parent commit `bb447fb7580279bf82f048877e6a23d2d23b6c1b`. Its first real failure was:
+
+```text
+FileNotFoundError: [Errno 2] No such file or directory: '/proc/cpuinfo'
+  FEX/Scripts/NeedDisabledSVE.py, GetCPUFeatures(), line 12
+During handling of the above exception, another exception occurred:
+  FEX/Scripts/NeedDisabledSVE.py, line 42, also opened /proc/cpuinfo
+CMake Error at FEX/CMakeLists.txt:529 (string):
+  string sub-command STRIP requires two arguments.
+```
+
+The same configure log also reported missing Python `packaging` and `pkg_resources` imports in `FEX/Scripts/aarch64_fit_native.py`. The five `HAS_SYSCALL_GETCPU/GETTID/TGKILL/STATX/RENAMEAT2` probes reported `Failed`; source inspection shows these are optional `check_cxx_source_compiles` probes, not independently fatal configure errors (`FEX/FEXHeaderUtils/CMakeLists.txt:5-56`).
+
+## Tried and ruled out
+
+- Re-running the same source without changing the configure path does not address Darwin's missing `/proc`; the previous failing run is evidence.
+- Adding Python `packaging` would not provide Linux `/proc/cpuinfo` and would leave the host/target CPU detection mismatch. The iOS build now uses `TUNE_CPU=none` instead.
+- The `HAS_SYSCALL_*` probe messages alone do not explain CMake's fatal `string(STRIP)` error. The patch sets these Linux-only feature flags to false on Darwin and relies on the existing Apple wrapper selection in `FEX/FEXHeaderUtils/FEXHeaderUtils/Syscalls.h`.
+- Earlier unrelated blockers are recorded in `PROGRESS.md`: Xcode selection privileges, LLVM's disabled example plugin, and an empty FEX `CMAKE_SYSTEM_PROCESSOR`. Those were addressed before the latest confirmed configure failure.
+
+## Not verified
+
+- The workflow for `d218a37` is the single permitted confirmation run, [38643156359](https://github.com/MayoMusic/winephone/actions/runs/38643156359). At last observation it had reached **Build and package unsigned IPA**; final logs/result were not yet available. Do not claim the patch fixed Darwin configure until this run completes and its logs show the FEX step.
+- No FEXCore static library build, Fibonacci JIT unit test, IPA package validation, iPhone install, debugger-attached JIT test, or game launch is recorded.
+- No new stubs were added. The Apple CMake path excludes the Linux syscall-emulation `Source/` tree and ELF launcher; excluded behavior is not a tested replacement. `docs/RE_NOTES.md` lists the remaining `/proc/self/maps` allocator and guest-syscall integration questions.
+- The `hw.optional.arm.FEAT_SVE` sysctl behavior is mocked locally only. **UNVERIFIED:** availability and value on the macOS runner; verify with `sysctl -n hw.optional.arm.FEAT_SVE` in that runner's log.
+- The FEXCore-only split may compile, but compile-time dependencies and the requested JIT Fibonacci execution test remain open.
+
+## Single next step
+
+Fetch the completed log for run `38643156359` once and inspect the first FEX configure/build error. If the same `/proc/cpuinfo`/`string(STRIP)` failure recurs after `d218a37`, stop and report it without another CI attempt. If FEX configuration advances, record the next compile error and ask for no new run until a code change targets that exact error.
