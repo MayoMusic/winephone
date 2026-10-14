@@ -4,12 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       only_stage:
-        description: Run only a named build stage; use fex-ios for fast Darwin FEX iteration
+        description: Run only a named build stage; fex-ios and wine-ntdll-unix need the restored toolchain cache
         required: true
         type: choice
         options:
           - all
           - fex-ios
+          - wine-ntdll-unix
         default: all
   push:
     branches: [main]
@@ -58,17 +59,19 @@ jobs:
         shell: bash
         run: |
           echo "Pinned toolchain cache exact-key hit: ${{ steps.toolchain-cache.outputs.cache-hit }}"
-          if [[ "${{ inputs.only_stage }}" == "fex-ios" && "${{ steps.toolchain-cache.outputs.cache-hit }}" != "true" ]]; then
-            echo "error: fex-ios-only dispatch requires the restored pinned toolchain cache" >&2
-            exit 1
+          if [[ "${{ inputs.only_stage }}" == "fex-ios" || "${{ inputs.only_stage }}" == "wine-ntdll-unix" ]]; then
+            if [[ "${{ steps.toolchain-cache.outputs.cache-hit }}" != "true" ]]; then
+              echo "error: a stage-only dispatch requires the restored pinned toolchain cache" >&2
+              exit 1
+            fi
           fi
 
       - name: Bootstrap pinned sources and toolchains
-        if: inputs.only_stage != 'fex-ios'
+        if: inputs.only_stage != 'fex-ios' && inputs.only_stage != 'wine-ntdll-unix'
         run: bash scripts/bootstrap.sh
 
       - name: Save toolchain cache after bootstrap
-        if: inputs.only_stage != 'fex-ios'
+        if: inputs.only_stage != 'fex-ios' && inputs.only_stage != 'wine-ntdll-unix'
         uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809
         with:
           path: |

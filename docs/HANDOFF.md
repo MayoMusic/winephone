@@ -125,6 +125,10 @@ Fetch the completed log for run `38643156359` once and inspect the first FEX con
 
 **Fix applied (intermediate commit, `[skip ci]`).** `build/fex-ios/build.sh` no longer passes `FEX_IOS_HOST_BUILD=ON` or `-DFEX_IOS_HOST` on C/C++/ASM, matching Madeira's recipe; `patches/fex-darwin.patch` is deleted because its only hunk guarded a Windows-API diagnostic that is no longer reached. Kept: `CMAKE_SYSTEM_PROCESSOR=arm64` (the runner's CMake otherwise leaves it empty → "Unsupported processor type .") and `TUNE_CPU=none` (Madeira's ARM64EC script sets `TUNE_CPU` for the same reason), plus `make -k` and the sorted `error:` summary.
 
+**Reverted.** Run `38644632372` then showed the `fex-ios` stage **passing** with the flags and patch in place, so this change is reverted: `build/fex-ios/build.sh` and `patches/fex-darwin.patch` are back to the `bb733f6` state and FEX is not touched. The recipe finding is kept as a note in `docs/MADEIRA_RECIPE.md`, not as a change.
+
+**Step 1 (still) — the log was not read.** The user supplied the stage and failure summary instead (see below); this worktree still cannot fetch Actions logs (no `gh`/token). Recorded from their report, not from a log this agent read.
+
 **UNVERIFIED:** the actual failing error for `bb733f6` (log not read); whether removing `FEX_IOS_HOST` lets FEXCore configure and compile on Darwin; cache restore; IPA/device behaviour.
 
 **Next step:** user pastes the failed log; record its first error and full `error:` list here, then commit the fix as the single non-`[skip ci]` change and read the one resulting run.

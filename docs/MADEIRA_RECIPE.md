@@ -86,6 +86,37 @@ The Step 2/3 table above originally kept `FEX_IOS_HOST` and `FEX_IOS_HOST_BUILD`
 
 Consequently `patches/fex-darwin.patch` (whose single hunk added `&& defined(_WIN32)` to that one block) is deleted: with the macro gone the block is unreachable in `build/fex-ios`, and it still compiles in the MinGW `fex-arm64ec` build where `_WIN32` is defined. Kept as needed Darwin deviations: `CMAKE_SYSTEM_PROCESSOR=arm64` and `TUNE_CPU=none`. **UNVERIFIED** until the macOS run: that FEXCore then configures and compiles.
 
+**Not adopted (2026-10-14, same day).** Run `38644632372` then showed the `fex-ios` stage **passing** with the flags and the patch in place. This change was therefore reverted: `build/fex-ios/build.sh` and `patches/fex-darwin.patch` are back to their `bb733f6` state and FEX is not touched. The analysis above stands only as a note should the flag ever need revisiting; it is not a change in the tree.
+
 ## Evidence limits
 
 The pinned Madeira documentation marks the FEX iOS target UNVERIFIED from a clean checkout (`docs/BUILDING.md:49`). This recipe records source text and exact pins; it does not prove an iOS CMake configure, compilation, or device run. All such outcomes remain **UNVERIFIED** until the stage-limited GitHub Actions run records them.
+
+## Step 6 — `wine-ntdll-unix` failure (run 38644632372, 2026-10-14)
+
+**Evidence (from the user-provided log; this worktree cannot read the run).** Stage `wine-ntdll-unix`: `wg_parser_apple_ios... OK`, and ~37 other translation units (`audio_null_ios`, `madsync`, `gnutls_symtab_ios`, `ws2_32_unixlib`, `bcrypt_unixlib`, `debug`, `env`, `file`, `loader`, `process`, `server`, `signal_*`, `socket`, `sync`, `syscall`, `thread`, `virtual`, ...) printed `FAILED` in 0.2-0.4 s each with **no compiler text in the log**. The `fex-ios` stage passed, so FEX is not touched here.
+
+**A. Why the log had no compiler text.** `build/ntdll-unix/build.sh:18-46` (`compile_one`) and `:57-82` (`compile_unixlib`) send each compile's stderr to `$OBJ_DIR/<name>.err` and print only `OK`/`FAILED`, plus a `Failed:` list at `:202-205`; the `.err` files stay on the runner. Fixed: both now funnel through a `run_compile` helper that, on failure, prints the source, the exact command line (bash `printf %q`) and the first 40 lines of stderr, and the script exits with a message before `ar` if anything failed (the pattern `build/win32u-unix/build.sh:143-144` already uses).
+
+**B. Why `wg_parser_apple_ios` passed and every other file failed.** It is the one compile in the script that passes **no Wine include**: a dedicated inline invocation (`build/ntdll-unix/build.sh:153-163` at HEAD) with no `-include config.h` and no `-I"$WINE_BUILD/..."`. Every other file goes through `compile_one`/`compile_unixlib`, and both use
+
+```sh
+-include "$WINE_BUILD/include/config.h"   # build/ntdll-unix/build.sh:27 and :65 at HEAD
+```
+
+with `WINE_BUILD="$WINE_SRC/build-macos"` (`:7`) — i.e. **`wine/build-macos`**, a configured Wine **build tree**, not Wine's source tree. An instantly-missing `-include` is exactly a ~0.2-0.4 s fatal error.
+
+**C. Madeira's script is identical.** `git diff 279fd0f:build/ntdll-unix/build.sh build/ntdll-unix/build.sh` is **empty (0 lines)**. So the divergence is not the script: Madeira's development machine had `wine/build-macos` pre-configured out of band, and WinePhone's pipeline never creates it.
+
+- `build/dxmt-ios/README.md:47-49`: "**Wine aarch64-windows static libs** already built in `wine/build-macos/` — see `build/ntdll-unix/build.sh` and the Wine submodule for the original configure."
+- `tests/host/check-wma-decoder.py:25-27`: "MADEIRA_WINE_BUILD (a configured Wine build tree whose include/ holds config.h and the widl-generated headers; default: `wine/build-macos`, the tree `build/ntdll-unix/build.sh` uses)."
+- Other consumers of the same tree: `build/winserver/build.sh:28` (`-I"$WINE_SRC/build-macos/include"`), `build/win32u-unix/build.sh:14`, `build/d3d11-triangle/build.sh:50`, `tests/dxmt/build.sh:21`, and `scripts/build-ipa.sh:84` (DXMT `-Dwine_build_path=../../wine/build-macos`).
+- The **only** Wine configure invocations in the whole repository are `build/wine-pe/build-ntdll.sh:18`, `build/wine-pe/build-modules.sh:104` (both `wine/build-arm64ec`) and `build/wine-i386/build.sh:49` (`wine/build-i386`). **Nothing configures `build-macos`.**
+
+**D. Fix.** New `build/wine-macos/configure.sh`, run by `scripts/build-ipa.sh` as stage `wine-macos` immediately before `wine-ntdll-unix` (and, in the new `only_stage=wine-ntdll-unix` path, before it too). It configures `wine/build-macos` with `--enable-archs=aarch64 --without-x --disable-tests`, derived from:
+
+- `docs/WOW64.md:288-290` — the aarch64 side comes from "a tree configured with `--enable-archs=aarch64`";
+- `build/wine-pe/build-ntdll.sh:18` and `build/wine-i386/build.sh:49` — the `--without-x --disable-tests` convention for the sibling trees;
+- `dxmt/build-aarch64-win.txt` (aarch64-windows cross file) and `dxmt/src/winemetal/meson.build:18-25` — DXMT needs `libs/winecrt0`, `dlls/winecrt0`, `dlls/ntdll`, `dlls/dbghelp` under `aarch64-windows`, plus `tools/winebuild/winebuild`, from that tree.
+
+**UNVERIFIED:** the exact flags Madeira's development machine used for `build-macos` (not recorded anywhere in the tree); whether configure succeeds on the runner; whether the unix compiles then pass; and DXMT additionally needs that tree **built** (`make tools/winebuild` plus the `aarch64-windows` import libraries), which this increment does not do.

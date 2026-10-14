@@ -114,3 +114,5 @@ The remaining `rg` hits for `syscall`, `<linux/...>`, `/proc`, `MEM_*`, `Virtual
 
 **UNVERIFIED:** Darwin configure/compile with the corrected flags; the failed log of run `38644632372`, which this worktree could not read (no `gh`, no token, REST API HTTP 403 rate-limited). The fix is recipe-derived, not log-confirmed.
 
+**Reverted (2026-10-14).** Run `38644632372` showed `fex-ios` **passing** with `FEX_IOS_HOST` and the patch in place, so this change was undone: `build/fex-ios/build.sh` and `patches/fex-darwin.patch` are back to the `bb733f6` state and FEX is not touched. The failure moved downstream to `wine-ntdll-unix` (see `docs/MADEIRA_RECIPE.md` Step 6).
+

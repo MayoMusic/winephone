@@ -15,12 +15,38 @@ SUCCEEDED=0
 FAILED=0
 FAILED_FILES=""
 
+# Run one compile. The compiler's stderr is kept in full in
+# $OBJ_DIR/<name>.err, and on failure the exact command line and the first 40
+# lines of that stderr are printed to the log: a bare "FAILED" tells us nothing
+# about why (the missing header, the -I path, the failing -D).
+run_compile() {
+    local name=$1
+    local src=$2
+    shift 2
+
+    if "$@" -c "$src" -o "$OBJ_DIR/$name.o" 2>"$OBJ_DIR/$name.err"; then
+        echo "OK"
+        SUCCEEDED=$((SUCCEEDED + 1))
+    else
+        echo "FAILED"
+        echo "      source:  $src"
+        echo "      command:"
+        printf '        %q' "$@"
+        printf ' -c %q -o %q\n' "$src" "$OBJ_DIR/$name.o"
+        echo "      stderr (first 40 lines; full log: $OBJ_DIR/$name.err):"
+        head -n 40 "$OBJ_DIR/$name.err" 2>/dev/null | sed 's/^/        /'
+        FAILED=$((FAILED + 1))
+        FAILED_FILES="$FAILED_FILES $name"
+    fi
+}
+
 compile_one() {
     local src=$1
     local name=$2
     echo -n "  $name... "
 
-    if xcrun -sdk iphoneos clang \
+    run_compile "$name" "$src" \
+        xcrun -sdk iphoneos clang \
         -arch arm64 -isysroot "$SDK" -miphoneos-version-min=17.0 \
         -O2 -fPIC -fvisibility=hidden -fno-stack-protector -fno-strict-aliasing \
         -Wno-implicit-function-declaration -Wno-int-conversion \
@@ -35,15 +61,7 @@ compile_one() {
         -DDATADIR=\"/usr/local/share\" -DSYSTEMDLLPATH=\"\" \
         -DWINE_UNIX_LIB -DWINE_IOS=1 \
         -Dget_thread_context=ntdll_get_thread_context \
-        -Dset_thread_context=ntdll_set_thread_context \
-        -c "$src" -o "$OBJ_DIR/$name.o" 2>"$OBJ_DIR/$name.err"; then
-        echo "OK"
-        SUCCEEDED=$((SUCCEEDED + 1))
-    else
-        echo "FAILED"
-        FAILED=$((FAILED + 1))
-        FAILED_FILES="$FAILED_FILES $name"
-    fi
+        -Dset_thread_context=ntdll_set_thread_context
 }
 
 # iOS-Madeira 2026-07-05 (Steam S0): compile a DLL's unix side into
@@ -58,7 +76,9 @@ compile_unixlib() {
     local src=$1 name=$2 prefix=$3
     shift 3
     echo -n "  $name... "
-    if xcrun -sdk iphoneos clang \
+
+    run_compile "$name" "$src" \
+        xcrun -sdk iphoneos clang \
         -arch arm64 -isysroot "$SDK" -miphoneos-version-min=17.0 \
         -O2 -fPIC -fvisibility=hidden -fno-stack-protector -fno-strict-aliasing \
         -Wno-implicit-function-declaration -Wno-int-conversion \
@@ -70,15 +90,7 @@ compile_unixlib() {
         -DWINE_UNIX_LIB -DWINE_IOS=1 \
         -D__wine_unix_call_funcs=${prefix}_unix_call_funcs \
         -D__wine_unix_call_wow64_funcs=${prefix}_unix_call_wow64_funcs \
-        "$@" \
-        -c "$src" -o "$OBJ_DIR/$name.o" 2>"$OBJ_DIR/$name.err"; then
-        echo "OK"
-        SUCCEEDED=$((SUCCEEDED + 1))
-    else
-        echo "FAILED"
-        FAILED=$((FAILED + 1))
-        FAILED_FILES="$FAILED_FILES $name"
-    fi
+        "$@"
 }
 
 echo "=== Building ntdll unix (iOS) ==="
@@ -151,17 +163,10 @@ compile_unixlib "$BUILD_DIR/winegstreamer_unixlib_ios.c" "winegstreamer_unixlib"
 # VideoToolbox, CoreMedia, CoreVideo, AudioToolbox and CoreFoundation
 # (app/Madeira.xcodeproj, Frameworks phase) next to the FFmpeg archives.
 echo -n "  wg_parser_apple_ios... "
-if xcrun -sdk iphoneos clang \
+run_compile wg_parser_apple_ios "$BUILD_DIR/wg_parser_apple_ios.c" \
+    xcrun -sdk iphoneos clang \
     -arch arm64 -isysroot "$SDK" -miphoneos-version-min=17.0 \
-    -O2 -fPIC -fvisibility=hidden -fno-stack-protector -fno-strict-aliasing -Wall -Werror=implicit-function-declaration \
-    -c "$BUILD_DIR/wg_parser_apple_ios.c" -o "$OBJ_DIR/wg_parser_apple_ios.o" 2>"$OBJ_DIR/wg_parser_apple_ios.err"; then
-    echo "OK"
-    SUCCEEDED=$((SUCCEEDED + 1))
-else
-    echo "FAILED"
-    FAILED=$((FAILED + 1))
-    FAILED_FILES="$FAILED_FILES wg_parser_apple_ios"
-fi
+    -O2 -fPIC -fvisibility=hidden -fno-stack-protector -fno-strict-aliasing -Wall -Werror=implicit-function-declaration
 
 for src in $WINE_SRC/dlls/ntdll/unix/*.c; do
     name=$(basename "$src" .c)
@@ -202,6 +207,12 @@ echo ""
 echo "Results: $SUCCEEDED succeeded, $FAILED failed"
 if [ -n "$FAILED_FILES" ]; then
     echo "Failed:$FAILED_FILES"
+fi
+
+if [ $FAILED -gt 0 ]; then
+    echo ""
+    echo "(not linking — per-file command lines and stderr are in the log above and in $OBJ_DIR/<name>.err)"
+    exit 1
 fi
 
 echo ""

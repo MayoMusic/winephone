@@ -9,8 +9,8 @@ OUT="$(cd "$OUT" && pwd)"
 start=$SECONDS
 ONLY_STAGE="${WINEPHONE_ONLY_STAGE:-all}"
 case "$ONLY_STAGE" in
-  all|fex-ios) ;;
-  *) echo "error: unsupported WINEPHONE_ONLY_STAGE '$ONLY_STAGE' (use all or fex-ios)" >&2; exit 2 ;;
+  all|fex-ios|wine-ntdll-unix) ;;
+  *) echo "error: unsupported WINEPHONE_ONLY_STAGE '$ONLY_STAGE' (use all, fex-ios or wine-ntdll-unix)" >&2; exit 2 ;;
 esac
 
 run_stage() {
@@ -38,6 +38,9 @@ if [[ "$ONLY_STAGE" == fex-ios ]]; then
     External/vixl External/fmt External/range-v3 External/rpmalloc \
     External/unordered_dense External/xxhash External/jemalloc_glibc \
     Source/Common/cpp-optparse
+elif [[ "$ONLY_STAGE" == wine-ntdll-unix ]]; then
+  echo "wine-ntdll-unix-only mode: skipping LLVM/toolchain bootstrap."
+  git submodule update --init --depth 1 wine
 elif [[ "${WINEPHONE_SKIP_BOOTSTRAP:-0}" == 1 ]]; then
   echo "Bootstrap already completed in the workflow."
 else
@@ -49,11 +52,20 @@ fi
   meson --version
   bison --version | head -n 1
   printf 'WinePhone base: '; git rev-parse HEAD
-  printf 'FEX: '; git -C "$ROOT/FEX" rev-parse HEAD
-  printf 'Wine: '; git -C "$ROOT/wine" rev-parse HEAD
-  printf 'DXMT: '; git -C "$ROOT/dxmt" rev-parse HEAD
-  git submodule status --recursive
+  printf 'FEX: '; git -C "$ROOT/FEX" rev-parse HEAD 2>/dev/null || echo "(not initialized)"
+  printf 'Wine: '; git -C "$ROOT/wine" rev-parse HEAD 2>/dev/null || echo "(not initialized)"
+  printf 'DXMT: '; git -C "$ROOT/dxmt" rev-parse HEAD 2>/dev/null || echo "(not initialized)"
+  git submodule status --recursive || true
 } | tee -a "$OUT/build-environment.txt"
+
+if [[ "$ONLY_STAGE" == wine-ntdll-unix ]]; then
+  export PATH="$ROOT/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin:$PATH"
+  run_stage wine-macos bash "$ROOT/build/wine-macos/configure.sh"
+  run_stage wine-ntdll-unix bash "$ROOT/build/ntdll-unix/build.sh"
+  echo "Build duration: $((SECONDS-start)) seconds"
+  echo "Build duration seconds: $((SECONDS-start))" >> "$OUT/build-environment.txt"
+  exit 0
+fi
 
 # Do not silently create an incomplete app. Microsoft redistributables,
 # Apple converter binaries and game files are intentionally not build inputs.
@@ -68,6 +80,12 @@ if [[ "$ONLY_STAGE" == fex-ios ]]; then
   exit 0
 fi
 run_stage fex-arm64ec bash "$ROOT/build/fex-arm64ec/build.sh"
+# wine/build-macos is the configured Wine tree every unix side (ntdll, win32u,
+# wineserver) and DXMT's PE build consume; Madeira treats it as a pre-existing
+# out-of-band build and no script created it (build/wine-macos/configure.sh has
+# the file references). It must exist before wine-ntdll-unix.
+export PATH="$ROOT/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin:$PATH"
+run_stage wine-macos bash "$ROOT/build/wine-macos/configure.sh"
 run_stage wine-ntdll-unix bash "$ROOT/build/ntdll-unix/build.sh"
 run_stage wineserver bash "$ROOT/build/wineserver/build.sh"
 run_stage win32u-unix bash "$ROOT/build/win32u-unix/build.sh"

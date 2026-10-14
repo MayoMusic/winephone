@@ -76,3 +76,12 @@
 - Added `workflow_dispatch` choice `only_stage=all|fex-ios`. The `fex-ios` path requires the exact-key cache restore to report a hit, skips LLVM/toolchain bootstrap, initializes only FEX and its required nested submodules, skips GnuTLS/FFmpeg and runs only the FEX iOS stage. The normal `all` path is unchanged.
 - The IPA upload steps and `WINEPHONE_BINARY_RELEASE_CLEARED` gate were not changed. No release variable was set.
 - Pending the one stage-limited run: prove cache restore from the workflow output, capture all FEX compile errors and stage duration. Those results remain **UNVERIFIED**.
+
+### Fifth macOS workflow attempt — FEX passes, wine-ntdll-unix fails (2026-10-14)
+
+- Run `38644632372` (commit `bb733f6`) failed after 11m22s. Reported from its log (this agent still cannot read Actions logs: no `gh`/token, REST API HTTP 403): the `fex-ios` stage **passed**, and `wine-ntdll-unix` failed.
+- `wg_parser_apple_ios... OK`; ~37 other translation units (`audio_null_ios`, `madsync`, `gnutls_symtab_ios`, `ws2_32_unixlib`, `bcrypt_unixlib`, `debug`, `env`, `file`, `loader`, `process`, `server`, `signal_*`, `socket`, `sync`, `syscall`, `thread`, `virtual`, ...) printed `FAILED` in 0.2-0.4 s each, with **no compiler text in the log** because `build/ntdll-unix/build.sh` redirects each compile's stderr to `obj/<name>.err` and prints only OK/FAILED.
+- Root cause established by reading the tree: `build/ntdll-unix/build.sh` is byte-identical to Madeira's, but every TU except `wg_parser_apple_ios` needs `-include "$WINE_BUILD/include/config.h"` from `wine/build-macos` (`:7,27,65`), a configured Wine tree that Madeira's machine had out of band (`build/dxmt-ios/README.md:47-49`, `tests/host/check-wma-decoder.py:25-27`) and that **no script in WinePhone ever creates**.
+- Change made: `build/ntdll-unix/build.sh` now prints each failing compile's exact command line and the first 40 lines of its stderr and exits before `ar`; new `build/wine-macos/configure.sh` configures `wine/build-macos` (`--enable-archs=aarch64 --without-x --disable-tests`), invoked as stage `wine-macos` before `wine-ntdll-unix` and available as `only_stage=wine-ntdll-unix`.
+- Also, the earlier `[skip ci]` FEX recipe-alignment change (`c4cd4a6`) was **reverted**: `fex-ios` passes as it was.
+- UNVERIFIED: the configure flags, the unix compiles, and whether DXMT additionally needs `wine/build-macos` built (`make tools/winebuild` + aarch64-windows import libs).
