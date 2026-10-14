@@ -44,8 +44,23 @@ jobs:
             toolchains/llvm-mingw-20260421-ucrt-macos-universal
           key: winephone-macos26-llvm-8dfdcc7b7bf66834a761bd8de445840ef68e4d1a-llvm-mingw-20260421-v1
 
+      - name: Bootstrap pinned sources and toolchains
+        run: bash scripts/bootstrap.sh
+
+      - name: Save toolchain cache after bootstrap
+        uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809
+        with:
+          path: |
+            toolchains/llvm-project
+            toolchains/llvm-host-build
+            toolchains/llvm-ios-build
+            toolchains/llvm-mingw-20260421-ucrt-macos-universal
+          key: winephone-macos26-llvm-8dfdcc7b7bf66834a761bd8de445840ef68e4d1a-llvm-mingw-20260421-v1
+
       - name: Build and package unsigned IPA
         run: bash scripts/build-ipa.sh artifacts
+        env:
+          WINEPHONE_SKIP_BOOTSTRAP: '1'
 
       - name: Upload unsigned IPA and hash
         if: vars.WINEPHONE_BINARY_RELEASE_CLEARED == 'true'

@@ -26,7 +26,11 @@ xcodebuild -showsdks | grep -q iphoneos || { echo "error: iOS SDK unavailable" >
   xcodebuild -version
   xcrun --sdk iphoneos --show-sdk-version
 } | tee "$OUT/build-environment.txt"
-run_stage bootstrap bash "$ROOT/scripts/bootstrap.sh"
+if [[ "${WINEPHONE_SKIP_BOOTSTRAP:-0}" == 1 ]]; then
+  echo "Bootstrap already completed in the workflow."
+else
+  run_stage bootstrap bash "$ROOT/scripts/bootstrap.sh"
+fi
 {
   cmake --version | head -n 1
   ninja --version

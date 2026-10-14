@@ -56,3 +56,9 @@
 - Run `38631948290` completed LLVM after 35m 8s, then built GnuTLS and FFmpeg successfully (GnuTLS 279s; FFmpeg 48s). It failed at `=== fex-ios ===`: the pinned FEX `CMakeLists.txt` saw an empty `CMAKE_SYSTEM_PROCESSOR` and aborted with `Unsupported processor type .`.
 - Blocker ladder rung 1: set `CMAKE_SYSTEM_PROCESSOR=arm64` explicitly for the iOS cross-configuration and enable FEX's `FEX_IOS_HOST_BUILD` plus its required `FEX_IOS_HOST` C/C++/ASM defines, matching the existing ARM64EC iOS build recipe.
 - FEX, Wine, DXMT and app targets were not reached. No IPA exists.
+
+### CI cache improvement (2026-10-15)
+
+- GitHub Actions did not retain a cache after the prior job failed, so LLVM would have rebuilt from source after every downstream failure.
+- Updated CI to run bootstrap as its own successful step, explicitly save pinned LLVM/toolchain outputs immediately afterward, then skip duplicate bootstrap inside the IPA packaging script. Cache action save is pinned to `actions/cache` v4.2.4 commit `0400d5f644dc74513175e3cd8d07132dd4860809`.
+- This change reduces future iteration cost; cache save and restoration are not yet verified.
