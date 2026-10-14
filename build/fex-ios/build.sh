@@ -20,5 +20,13 @@ if [ ! -f "$B/CMakeCache.txt" ]; then
         -DBUILD_TESTING=OFF -DBUILD_THUNKS=OFF -DBUILD_FEXCONFIG=OFF -DBUILD_FEX_LINUX_TESTS=OFF \
         -DENABLE_FEX_ALLOCATOR=OFF -DENABLE_ASSERTIONS=OFF -DENABLE_CLANG_THUNKS=ON -DENABLE_CCACHE=ON
 fi
-cmake --build "$B" --target FEXCore FEXCore_Base
+set +e
+make -k -j"$(sysctl -n hw.ncpu)" -C "$B" FEXCore FEXCore_Base 2>&1 | tee "$B/build.log"
+BUILD_STATUS=${PIPESTATUS[0]}
+set -e
+echo "FEX compiler error summary:"
+grep -E "error:" "$B/build.log" | sort | uniq -c || true
+if [ "$BUILD_STATUS" -ne 0 ]; then
+    exit "$BUILD_STATUS"
+fi
 ls "$B/FEXCore/Source/"*.a

@@ -65,3 +65,36 @@ The existing `build/fex-ios/build.sh` requests static targets `FEXCore` and `FEX
 
 **Unverified:** the FEXCore-only target completes on the selected macOS/iOS SDK. The active CI run from parent commit `10ef48c` predates patch application and is not used as evidence for this step. No Fibonacci execution test or iOS debugger-attached JIT test has been run. The latter remains explicitly unverified; verify on the iPhone 17 with the selected iOS and sideload debugger tooling after an IPA exists.
 
+## Step 4 — Darwin FEXCore compile audit and compile-error collection
+
+**Source/pin:** FEX `f59cab95659e8add0c88f0c76ec1cf483c536dbf`; WinePhone main before this fix `d218a37`. This is a static source audit on Windows; no Darwin compiler is available locally. Line references below are relative to the pinned FEX tree.
+
+**Compile hazard fixed in `patches/fex-darwin.patch`:** `FEX/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp:707-712` selected `VirtualQuery`, `MEMORY_BASIC_INFORMATION`, and `MEM_IMAGE`/`MEM_MAPPED`/`MEM_PRIVATE` under `FEX_IOS_HOST` alone. The iOS static FEXCore build also defines `FEX_IOS_HOST`, but is not a Windows PE build. The condition now requires both `FEX_IOS_HOST` and `_WIN32`; Darwin uses the adjacent short diagnostic that does not query Windows region metadata. The diagnostic is nonfunctional metadata only; no memory-management behavior is stubbed.
+
+**Scan inventory (Darwin compile-time status):**
+
+| Location | Finding | Classification |
+|---|---|---|
+| `FEX/FEXCore/Source/Utils/ArchHelpers/Arm64.cpp:707-712` | Windows `VirtualQuery` and `MEM_*` identifiers used in the iOS diagnostic branch. | Compile-time failure on Darwin; fixed by the patch above. |
+| `FEX/FEXCore/include/FEXCore/Utils/AllocatorHooks.h:7-196` | Windows allocation constants/APIs (`MEM_*`, `VirtualAlloc*`, `VirtualQuery`) occur in the `_WIN32` implementation branch. | Platform-conditional; not selected by Darwin. Confirmed source branch only; Darwin compiler still needs to verify. |
+| `FEX/FEXCore/include/FEXCore/Utils/File.h:12,27-...` | `<windows.h>` and Win32 file APIs are in the `_WIN32` branch. | Platform-conditional; POSIX file implementation selected on Darwin. |
+| `FEX/FEXCore/Source/Utils/Allocator.cpp:23-26,38-310` | Linux headers and `/proc/self/maps` (`:231-232`) are within the `__linux__` implementation. | Compile-time excluded on Apple; Apple implementation begins at `:311`. |
+| `FEX/FEXCore/Source/Utils/Allocator.cpp:319-352` | Apple allocator reports `StealMemoryRegion` unsupported (`return {}`), `Setup48BitAllocatorIfExists` empty, `VirtualName` no-op, and fork hooks empty. | Existing compile-time Darwin stubs; no new stub introduced. 48-bit VA reservation is intentionally unavailable on Apple. Runtime suitability remains UNVERIFIED. |
+| `FEX/FEXCore/include/FEXCore/Utils/PrctlUtils.h:4-...` | `<linux/prctl.h>` and Linux operations are under `__linux__`; Apple branch defines compatibility constants and `prctl(...) { return -1; }`. | Existing Darwin stub; callers must tolerate unsupported `prctl` operations. This audit does not prove each caller does. |
+| `FEX/FEXCore/include/FEXCore/Utils/InterruptableConditionVariable.h:8-15,40,70,74-...` | Linux futex header and `syscall(SYS_futex, ...)` vs Apple pthread/lock path. | Linux calls compile only in `__linux__` branch; Apple implementation exists. Runtime behavior UNVERIFIED. |
+| `FEX/FEXCore/include/FEXCore/Utils/WritePriorityMutex.h:6-11,351-...` | Linux futex/syscall branch and Apple lock/spin implementation. | Platform-conditional; Apple implementation exists. Runtime behavior UNVERIFIED. |
+| `FEX/FEXCore/include/FEXCore/Utils/SignalScopeGuards.h:164-184` | Linux `SYS_rt_sigprocmask` vs Apple POSIX signal calls. | Platform-conditional; Linux syscall code is excluded on Apple. |
+| `FEX/FEXCore/Source/Interface/Core/CPUBackend.cpp:14-16` | Linux `prctl` header. | `__linux__` conditional include. |
+| `FEX/FEXCore/Source/Utils/Profiler.cpp:5` | Linux magic header. | `__linux__` conditional include. |
+| `FEX/FEXCore/Source/Interface/Core/JIT/MiscOps.cpp:12-13,275-281` | `SYS_getcpu` numeric constant emitted for the translated guest operation. | Guest syscall instruction/number generation, not a Darwin host syscall dependency. Wine guest-syscall integration remains UNVERIFIED. |
+| `FEX/FEXCore/unittests/APITests/FileLoading.cpp:14,21` | Unit test reads `/proc/self/maps`. | Test-only Linux assumption; `BUILD_TESTING=OFF`, so excluded from this target. |
+| `FEX/FEXCore/Source/Interface/Core/Dispatcher/Dispatcher.cpp:876-888`; `.../JIT/JIT.cpp:540,560,669,691,1405` | `sys_icache_invalidate` in Apple branches, with separate FEX iOS / PE paths nearby. | Conditional/platform path; source audit indicates Apple-native calls are guarded by `__APPLE__`, but mixed target macro behavior needs Darwin compilation. UNVERIFIED. |
+
+The remaining `rg` hits for `syscall`, `<linux/...>`, `/proc`, `MEM_*`, `VirtualQuery`, and `<windows.h>` are accounted for above. FEX root CMake also excludes its Linux `Source/` launcher/syscall emulation when `APPLE` is true (existing `docs/RE_NOTES.md` Step 1); this build asks for `FEXCore` and `FEXCore_Base`, not the Linux ELF loader or Linux syscall emulator. That is evidence of the intended target boundary, not proof that the full iOS app integration is complete.
+
+**Existing stubs to preserve/document:** (1) Apple `prctl` returns `-1` in `PrctlUtils.h`; (2) Apple allocator VA-stealing returns an empty region list and its VA-name/fork hooks are no-ops in `Allocator.cpp`; (3) Apple syscall-feature probes are defined false by `patches/fex-darwin.patch`. The last item is a feature-probe fallback, not an implementation of Linux syscalls. The new `Arm64.cpp` short diagnostic only omits Windows region metadata; it is not a behavior stub.
+
+**Build diagnostics change:** `build/fex-ios/build.sh` now invokes `make -k -j"$(sysctl -n hw.ncpu)"` for the two static targets, saves output to `FEX/build-ios/build.log`, prints `grep -E "error:" ... | sort | uniq -c`, then returns Make's status. This is intended to collect independent compile errors in one runner execution. It has not yet been exercised on macOS.
+
+**Verification status:** `git -C FEX apply --check ../patches/fex-darwin.patch` passes against the pinned submodule. Darwin compile, complete error inventory, static-library output, the requested x86-64 Fibonacci JIT execution, macOS `MAP_JIT` behavior, and iOS debugger-attached JIT are all **UNVERIFIED**. The active workflow run `38643156359` was observed once as `in_progress`; per instruction it was not polled and no result is claimed.
+
