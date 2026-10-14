@@ -7,6 +7,11 @@ OUT="${1:-$ROOT/artifacts}"
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 start=$SECONDS
+ONLY_STAGE="${WINEPHONE_ONLY_STAGE:-all}"
+case "$ONLY_STAGE" in
+  all|fex-ios) ;;
+  *) echo "error: unsupported WINEPHONE_ONLY_STAGE '$ONLY_STAGE' (use all or fex-ios)" >&2; exit 2 ;;
+esac
 
 run_stage() {
   local label="$1" stage_start="$SECONDS"
@@ -26,7 +31,14 @@ xcodebuild -showsdks | grep -q iphoneos || { echo "error: iOS SDK unavailable" >
   xcodebuild -version
   xcrun --sdk iphoneos --show-sdk-version
 } | tee "$OUT/build-environment.txt"
-if [[ "${WINEPHONE_SKIP_BOOTSTRAP:-0}" == 1 ]]; then
+if [[ "$ONLY_STAGE" == fex-ios ]]; then
+  echo "fex-ios-only mode: skipping LLVM/toolchain bootstrap."
+  git submodule update --init --depth 1 FEX
+  git -C FEX submodule update --init --depth 1 \
+    External/vixl External/fmt External/range-v3 External/rpmalloc \
+    External/unordered_dense External/xxhash External/jemalloc_glibc \
+    Source/Common/cpp-optparse
+elif [[ "${WINEPHONE_SKIP_BOOTSTRAP:-0}" == 1 ]]; then
   echo "Bootstrap already completed in the workflow."
 else
   run_stage bootstrap bash "$ROOT/scripts/bootstrap.sh"
@@ -45,9 +57,16 @@ fi
 
 # Do not silently create an incomplete app. Microsoft redistributables,
 # Apple converter binaries and game files are intentionally not build inputs.
-run_stage gnutls bash "$ROOT/build/gnutls-ios/build.sh"
-run_stage ffmpeg bash "$ROOT/build/ffmpeg/build.sh"
+if [[ "$ONLY_STAGE" == all ]]; then
+  run_stage gnutls bash "$ROOT/build/gnutls-ios/build.sh"
+  run_stage ffmpeg bash "$ROOT/build/ffmpeg/build.sh"
+fi
 run_stage fex-ios bash "$ROOT/build/fex-ios/build.sh"
+if [[ "$ONLY_STAGE" == fex-ios ]]; then
+  echo "Build duration: $((SECONDS-start)) seconds"
+  echo "Build duration seconds: $((SECONDS-start))" >> "$OUT/build-environment.txt"
+  exit 0
+fi
 run_stage fex-arm64ec bash "$ROOT/build/fex-arm64ec/build.sh"
 run_stage wine-ntdll-unix bash "$ROOT/build/ntdll-unix/build.sh"
 run_stage wineserver bash "$ROOT/build/wineserver/build.sh"

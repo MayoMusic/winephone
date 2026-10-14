@@ -2,6 +2,15 @@ name: Build unsigned iOS IPA
 
 on:
   workflow_dispatch:
+    inputs:
+      only_stage:
+        description: Run only a named build stage; use fex-ios for fast Darwin FEX iteration
+        required: true
+        type: choice
+        options:
+          - all
+          - fex-ios
+        default: all
   push:
     branches: [main]
 
@@ -35,6 +44,7 @@ jobs:
           echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
 
       - name: Cache pinned toolchains
+        id: toolchain-cache
         uses: actions/cache@a7833574556fa59680c1b7cb190c1735db73ebf0
         with:
           path: |
@@ -44,10 +54,21 @@ jobs:
             toolchains/llvm-mingw-20260421-ucrt-macos-universal
           key: winephone-macos26-llvm-8dfdcc7b7bf66834a761bd8de445840ef68e4d1a-llvm-mingw-20260421-v1
 
+      - name: Report toolchain cache restore
+        shell: bash
+        run: |
+          echo "Pinned toolchain cache exact-key hit: ${{ steps.toolchain-cache.outputs.cache-hit }}"
+          if [[ "${{ inputs.only_stage }}" == "fex-ios" && "${{ steps.toolchain-cache.outputs.cache-hit }}" != "true" ]]; then
+            echo "error: fex-ios-only dispatch requires the restored pinned toolchain cache" >&2
+            exit 1
+          fi
+
       - name: Bootstrap pinned sources and toolchains
+        if: inputs.only_stage != 'fex-ios'
         run: bash scripts/bootstrap.sh
 
       - name: Save toolchain cache after bootstrap
+        if: inputs.only_stage != 'fex-ios'
         uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809
         with:
           path: |
@@ -61,6 +82,7 @@ jobs:
         run: bash scripts/build-ipa.sh artifacts
         env:
           WINEPHONE_SKIP_BOOTSTRAP: '1'
+          WINEPHONE_ONLY_STAGE: ${{ inputs.only_stage || 'all' }}
 
       - name: Upload unsigned IPA and hash
         if: vars.WINEPHONE_BINARY_RELEASE_CLEARED == 'true'

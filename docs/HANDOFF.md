@@ -90,3 +90,15 @@ Fetch the completed log for run `38643156359` once and inspect the first FEX con
 **Current blocker:** FEXCore has not yet been confirmed compiling on Darwin; run `38644632372` remains unknown beyond its one `in_progress` observation.
 
 **Next step:** Add stage-only dispatch for `fex-ios`, explicitly report cache restore hit/miss, and make the stage-only path require a restored toolchain cache without running the LLVM bootstrap. Preserve the existing artifact publication gate.
+
+### Step 4 complete
+
+**Done:** Added `workflow_dispatch.only_stage` (`all` or `fex-ios`), cache restore hit reporting with an exact-hit requirement for the FEX-only dispatch, and a `scripts/build-ipa.sh` branch that initializes only FEX sources, skips LLVM bootstrap and unrelated build stages, then exits after FEX iOS. The existing `make -k -j$(sysctl -n hw.ncpu)` plus sorted unique compiler error report stays in `build/fex-ios/build.sh`. Updated `PROGRESS.md`; its cache restore status remains **UNVERIFIED** until runner output.
+
+**Gate:** The artifact upload conditions and `WINEPHONE_BINARY_RELEASE_CLEARED` value were left unchanged. `DECISIONS.md` was not modified.
+
+**Validation limits:** Git diff checks pass. This host lacks Bash and PyYAML, so shell syntax and local workflow YAML parsing are **UNVERIFIED**. Workflow dispatch semantics, exact cache restore, FEX source fetch, and stage behavior also remain **UNVERIFIED** until CI.
+
+**Current blocker:** FEXCore Darwin configure/compile result is unknown. Run `38644632372` had one observed `in_progress` status and was not polled.
+
+**Next step:** Commit and push the complete stage-limited FEX fix as the single non-`[skip ci]` change, launch one `fex-ios` dispatch, and inspect that run once.

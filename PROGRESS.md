@@ -69,3 +69,10 @@
 - Blocker ladder rung 1: set FEX `TUNE_CPU=none` for the generic iOS ARM64 build so configuration does not probe the build host's CPU or Linux `/proc`. This avoids adding a new Python package dependency to a path that does not need host-specific tuning.
 - The `actions/cache/save` step completed successfully, so the toolchain cache save is now verified. Cache restoration on a subsequent run remains unverified. No Wine/DXMT/app product link or IPA packaging was reached.
 - Next: push this FEX configuration fix and run the cached workflow; inspect its first failure and continue.
+
+### Stage-limited FEX iteration preparation (2026-10-15)
+
+- GitHub's cache listing contains the exact pinned toolchain cache key (1.48 GiB), proving a cache entry was saved. This does **not** prove the runner restores it; restore remains **UNVERIFIED**.
+- Added `workflow_dispatch` choice `only_stage=all|fex-ios`. The `fex-ios` path requires the exact-key cache restore to report a hit, skips LLVM/toolchain bootstrap, initializes only FEX and its required nested submodules, skips GnuTLS/FFmpeg and runs only the FEX iOS stage. The normal `all` path is unchanged.
+- The IPA upload steps and `WINEPHONE_BINARY_RELEASE_CLEARED` gate were not changed. No release variable was set.
+- Pending the one stage-limited run: prove cache restore from the workflow output, capture all FEX compile errors and stage duration. Those results remain **UNVERIFIED**.
