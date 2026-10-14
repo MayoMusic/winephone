@@ -46,3 +46,17 @@ The same configure log also reported missing Python `packaging` and `pkg_resourc
 ## Single next step
 
 Fetch the completed log for run `38643156359` once and inspect the first FEX configure/build error. If the same `/proc/cpuinfo`/`string(STRIP)` failure recurs after `d218a37`, stop and report it without another CI attempt. If FEX configuration advances, record the next compile error and ask for no new run until a code change targets that exact error.
+
+## Current continuation (2026-10-15)
+
+**Goal:** Continue the existing Madeira-based Track A build toward a locally validated unsigned IPA on the macOS GitHub runner. Keep `WINEPHONE_BINARY_RELEASE_CLEARED` unset and IPA artifact publication gated; leave DECISIONS.md D-001 through D-008 unchanged.
+
+**Step 0:** Checked run `38644632372` exactly once. Result: `status=in_progress`, empty conclusion. No poll or log fetch was made.
+
+**Done:** `bb733f6` pushed the Arm64.cpp Windows diagnostic guard, FEX compiler-error summary command, and source audit. The new run above corresponds to that commit. Previous pin/source work includes Madeira `279fd0f83170425db002fe25d6bd62f6355f497d` and FEX `f59cab95659e8add0c88f0c76ec1cf483c536dbf`.
+
+**Current blocker:** The Darwin FEXCore build result for `bb733f6` is not known because its workflow remains in progress and the instruction prohibits polling. The prior checked run `38643156359` was also in progress at its single check.
+
+**UNVERIFIED:** Darwin CMake/build success; restored toolchain cache effectiveness; full FEX compiler error list; `packaging` as the cause vs workaround for the earlier configure failure; macOS or iOS JIT execution; IPA validation and device/game launch.
+
+**Next step:** Read Madeira's exact pinned `docs/BUILDING.md` recipe and every directly invoked FEX iOS build script at commit `279fd0f83170425db002fe25d6bd62f6355f497d`; compare it with WinePhone's current bootstrap/build/workflow, then write the sourced recipe/diff before any new CI run.
