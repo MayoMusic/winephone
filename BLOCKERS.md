@@ -249,3 +249,13 @@
 - **Status:** fixed in the tree; **UNVERIFIED** until a macOS run executes the
   GnuTLS stage (no GnuTLS sources are built here) and the validator then sees
   the four files.
+- **One ambiguity left to the next run:** the project's `Libraries` group has no
+  `path`, so Xcode resolves a bare reference from the project directory. The
+  relative `../../FEX/build-ios/...` references only resolve from
+  `app/Madeira/`, which is the base this stage (and the validator) now uses; but
+  `.gitignore` also carries `app/libwineserver.a` and `app/libwin32u_unix.a`,
+  the two archives that predate this work, so an earlier project revision
+  resolved them one level up. If the next run's `xcodebuild` reports a missing
+  archive after the validator passes, the resolution base is `app/` and the
+  correct repair is to make those file references explicit (or copy alongside,
+  as the older entries imply) — the log will name the path.
