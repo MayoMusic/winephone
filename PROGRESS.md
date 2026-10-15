@@ -106,3 +106,169 @@
 - Changes: the stage-only path now runs the `gnutls` and `ffmpeg` stages (`scripts/build-ipa.sh:68-69`); FreeType is a separate pinned build with its **own** cache key (`.github/workflows/build-ipa.yml:88-113`) and now clones and verifies the pinned commit itself; the stage prints its full include-path diagnostic (`build/ntdll-unix/build.sh:26-73`), including the toolchain cache-hit value; `server_ios.c` drops `pgw=` and keeps `pin=`.
 - Recorded for the next run: the wall after these six is not one of them. `dwrite_unixlib` and `winegstreamer_unixlib` also need the widl-generated `dwrite_3.h`/`d2d1.h`/`mfobjects.h`, which exist only in a *built* Wine tree (makedep writes those rules — `wine/tools/makedep.c:2004-2009` — and widl is itself a build product). `build/wine-macos/configure.sh` now generates them after configure, best-effort and logged (B-010).
 - UNVERIFIED: every fix in this list, including the make-based header generation and the `--enable-archs=aarch64` configure flags, the unix compiles, and whether DXMT additionally needs `wine/build-macos` built. The FEX recipe-alignment change stays reverted; `DECISIONS.md` and the artifact release gate are untouched.
+
+### Build-path, cache and packaging repairs (2026-10-15, cloud worktree)
+
+Scope: the two header paths the earlier diagnostic reported, the toolchain cache
+validation, the packaged-artifact checks and the workflow conditions that decide
+what a run publishes. No FEX, Wine or DXMT source was touched; `DECISIONS.md` and
+the `WINEPHONE_BINARY_RELEASE_CLEARED` gate are unchanged.
+
+- **The two "missing" paths were not dependencies.** `wine/build-arm64ec/include/dwrite_3.h`
+  cannot exist while `wine-ntdll-unix` runs (`wine-pe-ntdll` builds that tree
+  later, `scripts/build-ipa.sh`), and `build/freetype-ios/build/include/ft2build.h`
+  is never created by any FreeType configuration: `ft2build.h` is a *source*
+  header (`research/freetype/include`) while the build tree contributes the
+  generated `include/freetype/config/{ftconfig.h,ftoption.h}`. Verified by
+  reading freetype `42608f77f2`'s `CMakeLists.txt` (FTCONFIG_H_NAME/FTOPTION_H_NAME
+  under `${PROJECT_BINARY_DIR}`, `file(GLOB PUBLIC_HEADERS "include/ft2build.h")`)
+  and comparing both `ftconfig.h` files: the UNIX one adds only
+  `#undef HAVE_UNISTD_H`/`#undef HAVE_FCNTL_H`. `dwrite_unixlib` now takes
+  `-I"$FREETYPE_INC_BUILD" -I"$FREETYPE_INC_SRC"` (build dir first, the order
+  `build/win32u-unix/build.sh` already used instead of the dead arm64ec path).
+- **The diagnostic now distinguishes required from informational**, and a missing
+  required header stops the stage by name before the compiles. The FreeType
+  producer verifies its own outputs (pinned commit, `libfreetype.a` + arm64
+  slice, both generated headers, source `ft2build.h`); win32u refuses to build
+  the font unit without them.
+- **Toolchain cache:** `scripts/bootstrap.sh` now validates each restored tree
+  against the artifact its consumers use (checkout at the LLVM pin, `bin/llvm-tblgen`,
+  `include/llvm/Config/llvm-config.h` + `lib/*.a`) and rebuilds only what is
+  absent or at another revision; the pinned sources are always fetched. The
+  workflow saves the cache only on a miss (`actions/cache/save` cannot reserve an
+  existing key). Writing this surfaced a real bug in the first version of the new
+  check: `LLVM_IOS_OBJECTS="$(ls ... | wc -l)"` aborts under `set -euo pipefail`
+  when `lib/` is absent — i.e. on exactly the cache miss it was written for.
+- **IPA packaging:** `tools/validate-ipa.sh` checks the archive
+  (`Payload/<App>.app/Info.plist`, `CFBundleExecutable` names a file present in
+  the bundle *and* the archive, exactly one `.app`, an arm64 slice, no forbidden
+  converter/Microsoft runtime) and writes+verifies `SHA256SUMS` with
+  `shasum -a 256 -c`. `scripts/build-ipa.sh` records what it produced in
+  `artifacts/build-status.txt` (`IPA_PRESENT=1` with path/arch/hash, or `0` for a
+  stage-only dispatch), and the workflow prints it, verifies the hash of the exact
+  file it uploads, uploads the IPA **and** its hash, and says plainly that a
+  stage-only dispatch produces no IPA.
+- **Xcode and SDK are two different numbers:** the workflow selects the pinned
+  `Xcode_26.6.app` (failing with the list of installed Xcodes when it is
+  absent) and then **verifies** what it selected — `xcodebuild -version` must
+  report Xcode 26.6, the `xcrun --sdk iphoneos --show-sdk-path` must exist, and
+  the SDK major version must be ≥ the 17.0 every stage compiles against. The
+  two numbers the logs show (`Xcode 26.6` / `Build version 17F113` and the SDK
+  `26.5`) are the same installation: the macOS 26 runner image's inventory maps
+  `iphoneos26.5` to both Xcode 26.5 and 26.6.
+- **CI coverage:** a `host-checks` job now runs the 106 `tests/host` checks that
+  need no submodule and no Swift toolchain; until now nothing ran them, and ten
+  of them assert their own presence in the workflow.
+- **Tests added:** `tests/host/check-ipa-build-graph.py` (the header/flag/upload
+  contract, 0/29 passing before the change), `tests/host/check-ipa-validation.py`
+  (real zip fixtures plus a stubbed `lipo`: a good IPA passes, and a missing
+  executable slice, a second `.app`, a missing plist, a forbidden runtime file and
+  a stale `SHA256SUMS` are each refused), `tests/host/check-toolchain-cache.py`
+  (complete cache, cache missing the iOS archives, empty cache, cache at another
+  revision). Suite result here: **105 passing / 44 failing** (was 94/52), no
+  previously passing check regressed; the 44 need the wine/DXMT/FEX submodules
+  (uninitialised in this worktree), `swiftc`/`xcrun`, or are the two workflow-step
+  checks recorded in B-012.
+- **UNVERIFIED, and why:** nothing in this change set has run on macOS or a
+  device. No Xcode, no Wine build tree and no submodules exist in this worktree,
+  so the compile-level behaviour of the changed include paths and the two `make`
+  invocations in `build/wine-macos/configure.sh` remain unexecuted; the new tests
+  are source/contract level except the IPA validator and bootstrap, which are
+  executed against real archives and a stubbed toolchain.
+
+### wineserver stage: the base archive now has a producer (2026-10-15)
+
+- The full-path run at `3daa133` got past every stage the previous sessions
+  repaired (gnutls, ffmpeg, fex-ios, fex-arm64ec, wine-macos + widl headers,
+  wine-ntdll-unix 37/37) and stopped at `=== wineserver ===` with
+  `ERROR: No base libwineserver.a found` — the first time the pipeline reached
+  this stage at all.
+- Root cause (B-013): the stage patched a "base" archive that had to pre-exist
+  at `app/Madeira/libwineserver.a` — git-ignored, never committed, produced by
+  no script in the repository. It was an out-of-band artifact of the original
+  dev machine, so a clean checkout could never pass this stage.
+- Repair: `build/wineserver/build.sh` builds the base from the pinned
+  submodule's `server/Makefile.in` `SOURCES` with the stage's own flags, keeps
+  the natural object names so the existing patched-object swap and symbol
+  rename still work, and still honours a pre-existing local archive. `$0 base`
+  is a new producer-only mode; both failure paths (missing submodule, empty
+  source list) name the true cause instead of the old blanket error.
+- Tests: `tests/host/check-wineserver-base.py` (new, wired into the workflow's
+  host-checks job and into `check-ipa-build-graph.py`) executes the real script
+  in a sandbox with stub compilers/archiver: base member set, object swap,
+  rename-sweep coverage, legacy-archive reuse and both diagnostics. Suite
+  status for the touched surface: wineserver-base, ipa-build-graph,
+  toolchain-cache, ipa-validation and every workflow-reading check pass;
+  `check-vcruntime-mfc.py`/`check-shader-pack.py` still fail exactly as at HEAD
+  (inherited step expectations recorded in B-012, not run in CI).
+- The source list is 44 `.c` files, not 43: the pinned
+  `server/Makefile.in` at wine `9129e968` lists 44 `.c` (plus `security.h` and
+  the three man pages, which are not compiled), and the stage's `awk` parser
+  was run against that file here — every one of the 44 exists at the pin
+  (`raw.githubusercontent.com/willfaust/wine/9129e968/...`, HTTP 200 for all),
+  as do all 13 `$WINE_SRC/server/*.c` sources named in `PATCHED_FILES`.
+- `only_stage=wineserver` is now dispatchable: the stage-only path fetches the
+  wine submodule and runs `build/wine-macos/configure.sh` (its one
+  prerequisite — the iOS shims and the ntsync header it also includes are
+  tracked in this repository, and it links no other stage's output) before
+  `build/wineserver/build.sh`, so the repaired stage can be verified without
+  the fex-ios/fex-arm64ec legs of the full path.
+- UNVERIFIED: the 44 real iOS `server/*.c` compiles and everything after this
+  stage (win32u-unix, wine-pe, DXMT, xcodebuild, IPA) — one full workflow run
+  away.
+
+### CI evidence read back from the GitHub API (2026-10-15)
+
+This worktree has network access to `raw.githubusercontent.com` and the
+unauthenticated REST API (run *logs* need admin rights — `403 Must have admin
+rights to Repository` — so the step-level conclusions below are the evidence,
+not log text). Three runs exist past the 6bde730/3daa133 repairs:
+
+| run | commit | dispatch | conclusion | step that failed | skipped, and why |
+| --- | --- | --- | --- | --- | --- |
+| 14 (38655974280) | `3daa1338` | stage-only | **success** | — | 7/8 bootstrap+save, 14/15 IPA upload+evidence, 16 gate |
+| 15 (38664461063) | `3daa1338` | `only_stage=all` | failure | 13 Build and package unsigned IPA | 11/12 FreeType build+save (cache hit), 14/15/16 |
+| 16 (38686578495) | `3daa1338` | `only_stage=all` | failure | 13 Build and package unsigned IPA | 11/12 FreeType build+save (cache hit), 14/15/16 |
+
+- The two `all` runs stop inside `Build and package unsigned IPA` — the
+  `=== wineserver ===` / `ERROR: No base libwineserver.a found` failure B-013
+  describes (the run the user quoted). FreeType is skipped because its own
+  cache key is an exact hit, which is the designed behaviour
+  (`build/freetype-ios/build.sh` verifies the restored tree itself).
+- Run 14 is green with **no IPA**: bootstrap, the IPA upload and the evidence
+  upload are all skipped. That is the documented stage-only shape, and it is
+  why the workflow's "Report build result" step reads
+  `artifacts/build-status.txt` (`IPA_PRESENT=0`) instead of treating a green
+  build step as an artifact — a step-level conclusion alone cannot tell the two
+  apart, which is the finding Critical Issue A asks for.
+- Runs 14/15/16 all predate `92fad32`, which carries the wineserver repair, the
+  workflow fixes and the `host-checks` job: none of them ran `tests/host`
+  (`total jobs 1` in each), so B-012 stands for every run on `main` so far.
+- **The Xcode 26.6 / 26.5 discrepancy is not a discrepancy.** The macOS 26
+  runner image's published inventory (`actions/runner-images`,
+  `images/macos/macos-26-Readme.md`) lists Xcode 26.6 (build **17F113**, the
+  default) *and* Xcode 26.5 (17F42), and its SDK table maps **iOS 26.5**
+  (`iphoneos26.5`) to *both* Xcode 26.5 and 26.6. So `Xcode 26.6` /
+  `Build version 17F113` from `xcodebuild -version` and `26.5` from
+  `xcrun --sdk iphoneos --show-sdk-version` are the same installation reporting
+  two different things: the Xcode version and the iPhoneOS SDK it ships. The
+  selection step now asserts the pair (Xcode exactly 26.6, SDK path present,
+  SDK major ≥ the `-miphoneos-version-min=17.0` the stages compile with)
+  instead of printing them, and fails by name when a future image moves.
+- **The next blocker in the same class (B-015):** the Xcode target links 20
+  archives; 13 of them are bare names that
+  `tools/validate_release_inputs.py` resolves against `app/Madeira` before
+  `xcodebuild`, and the GnuTLS stage was the one producer that left its four
+  (`libgnutls`, `libhogweed`, `libnettle`, `libgmp`) only in
+  `toolchains/gnutls-ios/lib`. That validator would have exited 2 with
+  `Missing linked archives` on the first run that got that far — the same
+  producer/consumer defect as B-013, one stage later, invisible until the
+  wineserver stage stopped killing the run. The stage now installs them into
+  `app/Madeira/` in dependency order and verifies each is the iOS arm64 slice;
+  `check-ipa-build-graph.py` derives the bare-name set from the project file
+  itself and requires a placing producer for every entry, so this class cannot
+  come back silently.
+- The workflow's full-vs-stage-only conditions are now one predicate
+  (`(inputs.only_stage || 'all')`), so no step keys off a named stage and the
+  `push` event (unset input) cannot be mistaken for a stage-only run;
+  `tests/host/check-ipa-build-graph.py` pins that.

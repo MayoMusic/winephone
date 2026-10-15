@@ -73,10 +73,189 @@
 - **Next path:** `build/wine-macos/configure.sh` now generates them in `wine/build-macos/include` — the tree every unix side already includes — with `make -C wine/build-macos/tools/widl` (only when the binary is absent) followed by `make -C wine/build-macos/include`, and prints `present`/`MISSING` for all four headers. It is deliberately best-effort: a failure is printed and the stage continues, so the diagnosis stays with `build/ntdll-unix/build.sh:26-73` and any compile still fails loudly with its command line.
 - **Status:** Fix added, **UNVERIFIED**: the make invocations were read out of makedep/configure, not executed (this worktree has no macOS, no bison/flex and no root, so no Wine build tree can be generated); whether `make -C include` needs further generated sources first is unknown.
 
-## B-011: `libwineserver.a` has no reproducible producer, so a clean checkout cannot build wineserver
+## B-011: the unix-side header diagnostic named two paths that are not dependencies
 
-- **Evidence:** run `38727641709` (`all`, commit `3daa133`, 11m29s to failure) cleared every earlier stage and stopped at the first line of `wineserver`: `ERROR: No base libwineserver.a found`. That message is `build/wineserver/build.sh:20`. The base it wants is `app/Madeira/libwineserver.a`, which **Madeira git-ignores** (Madeira `.gitignore:33` and `:34` at commit `279fd0f`) and that nothing produces: `wine/server/Makefile.in` declares only `PROGRAMS = wineserver`, so Wine's build emits no library; `git grep libwineserver` over all of Madeira at `279fd0f` hits only `build/wineserver/build.sh`, `.gitignore`, and three `app/` references; and `app/Madeira/` in a fresh clone contains exactly four archives (`libgmp.a`, `libgnutls.a`, `libhogweed.a`, `libnettle.a`, the four `docs/BUILDING.md:33-37` marks as tracked) and no `libwineserver.a`. Madeira's `docs/BUILDING.md:53` records the step as "Verified on the development machine", i.e. verified only where the untracked artifact already existed. Madeira's own clean checkout cannot pass this step either.
-- **Impact:** `wineserver`, and therefore `win32u-unix`, the DXMT PE build, the app link and the IPA, all remain unreachable. No IPA can exist until this is closed.
-- **Next path:** `build/wineserver/build.sh` now builds the base itself when no prebuilt base is present: it compiles all 44 `wine/server/*.c` with the same `CC_FLAGS` the patched objects use and archives them with `ar rcs`. Same flags matter — the `objcopy` rename sweep and the `ar d`/`ar r` replacement step both assume base and patched objects are flag-identical. Sources later replaced (`main.c`, `request.c`, `unicode.c`, `fd.c`, `mach.c`, `window.c`, `mapping.c`, `queue.c`) are deliberately included, because the replacement step is `ar d old` + `ar r new` and expects the original member to exist. A `BASE_SKIP` array exists for sources proven not to build; it starts empty and every entry must cite an observed compiler error. Failures are collected and reported together, so one run names every offending source instead of stopping at the first. A new `only_stage=wineserver` path (submodule + `wine-macos` configure + this stage) makes the 44-source probe cheap.
-- **Validation so far:** `bash -n` passes on both edited scripts; the workflow parses and exposes `wineserver`. The failure path was exercised locally with a stub `xcrun` that always fails: the loop visited all 44 sources, reported `incomplete, 44 server source(s) failed`, listed them sorted, and exited 1. **Untested:** whether all 44 compile for iOS. Only a macOS runner has the iOS SDK. Expect `BASE_SKIP` to need at least one entry.
-- **Status:** Fix written and locally exercised on its failure path; **UNVERIFIED** on macOS.
+- **Evidence:** run `38651245572`'s diagnostic block reported
+  `MISSING: wine/build-arm64ec/include/dwrite_3.h` and
+  `MISSING: build/freetype-ios/build/include/ft2build.h`. Neither is a real
+  dependency of the `wine-ntdll-unix` stage:
+  - `wine/build-arm64ec` is the ARM64EC PE tree, created by
+    `build/wine-pe/build-ntdll.sh` (`:20`) which `scripts/build-ipa.sh` runs
+    *after* `wine-ntdll-unix`; the widl-generated `dwrite_3.h`/`d2d1.h` the
+    compile needs come from `wine/build-macos/include`, which
+    `build/wine-macos/configure.sh` generates and `compile_unixlib` already
+    passes as `-I"$WINE_BUILD/include"`. The extra `-I` flag pointed at a tree
+    that cannot exist yet.
+  - FreeType's CMake build (freetype `42608f77f2`, `CMakeLists.txt`) writes
+    `${PROJECT_BINARY_DIR}/include/freetype/config/{ftconfig.h,ftoption.h}` and
+    globs `include/ft2build.h` from the *source* tree; it never writes
+    `ft2build.h` into the build tree, so that path does not exist on any
+    configuration. What the compile really needs from the build tree is the
+    generated `ftconfig.h` (the UNIX one, from `builds/unix/ftconfig.h.in`),
+    named *before* `research/freetype/include` so it wins over the ANSI copy
+    there — the order `build/win32u-unix/build.sh` has always used. Comparing
+    the two files: `builds/unix/ftconfig.h.in` differs from
+    `include/freetype/config/ftconfig.h` only by `#undef HAVE_UNISTD_H` /
+    `#undef HAVE_FCNTL_H`, which CMake turns into defines when the headers are
+    present; the include list below them is identical.
+- **Impact:** the diagnostic reported two false MISSING lines on a healthy tree
+  and never checked the generated header the compile depends on.
+- **Next path:** `build/ntdll-unix/build.sh` now splits its list into
+  `REQUIRED_HEADERS` (checked, and a miss exits 1 by name before the compiles)
+  and `INFORMATIONAL_PATHS` (the arm64ec tree and `libfreetype.a`, named so the
+  pipeline order is visible), and the comment records which stage produces each
+  one. `dwrite_unixlib` now gets `-I"$FREETYPE_INC_BUILD" -I"$FREETYPE_INC_SRC"`;
+  `build/win32u-unix/build.sh` and `build/freetype-ios/build.sh` check the same
+  pair (the producer verifies the archive, its arm64 slice, both generated
+  headers and the source `ft2build.h`).
+- **Status:** fixed in the tree, **UNVERIFIED** until a `wine-ntdll-unix` stage
+  runs again (this worktree has no macOS and no Wine source to execute it).
+
+## B-012: nothing in CI ran the `tests/host` suite
+
+- **Evidence:** the repository's only workflow, `.github/workflows/build-ipa.yml`,
+  had no step that invoked `tests/host/*`. Ten checks assert that it does, and
+  failed on a clean checkout: `check-lean-diag.py:252`,
+  `check-power-probe.py:262`, `check-eco-native.py:137`,
+  `check-quiet-log.py:201`, `check-srv-direct.py:588`,
+  `check-srv-fd-reply.py`, `check-srv-eco-follow.py`,
+  `check-msc-unbounded-retry.py:286`, `check-x64-image-nocopy.py:160`
+  (all "CI runs this check"), plus `check-shader-pack.py:970` and
+  `check-vcruntime-mfc.py:38`, which index specific steps of a workflow that no
+  longer has them.
+- **Impact:** ~150 regression checks, several of which guard the exact defects
+  B-009/B-010 describe, were never run by CI; a green `build-ipa` job said
+  nothing about them.
+- **Next path:** a new `host-checks` job (`ubuntu-latest`) runs the 106 checks
+  that need no submodule and no Swift toolchain, one step per check, named
+  `Check <name>` as the checks expect. The remaining checks need the wine, DXMT
+  or FEX submodules or `swiftc`; they run locally (with the submodules
+  initialised) and are named in the job's comment.
+  `check-vcruntime-mfc.py` and `check-shader-pack.py` were **not** changed: the
+  former asserts Madeira's step that fetches Microsoft's runtime DLLs, which
+  WinePhone deliberately refuses (`DECISIONS.md`, IPA_BUILD.md item 4,
+  `tools/validate_release_inputs.py`), and the latter indexes a step this
+  workflow does not have. Both are recorded here rather than edited, because
+  changing an inherited test to match a different release policy is a decision
+  for the project, not a build repair.
+- **Status:** job added; it ran here on the same checks
+  (`python3 tests/host/check-<name>.py`), 106/106 passing on Linux. **UNVERIFIED**
+  on a GitHub runner.
+
+## B-013: the wineserver stage had no producer for its base `libwineserver.a`
+
+- **Evidence:** the full-path run at `3daa133` (user-supplied log) reached
+  `=== wineserver ===` immediately after `wine-ntdll-unix` succeeded 37/37 and
+  died with `ERROR: No base libwineserver.a found`, exit 1. The stage
+  (`build/wineserver/build.sh`, old `:16-22`) required the archive to already
+  exist at `build/wineserver/obj/libwineserver.a` or `app/Madeira/libwineserver.a`.
+  That file is git-ignored (`.gitignore:33`), `git log --all --
+  app/Madeira/libwineserver.a` is empty, and no script in the repository
+  produced it: it was an out-of-band artifact of the original development
+  machine. The Xcode project links it (`project.pbxproj:74`), so it is a real
+  input, not a diagnostic nicety.
+- **Impact:** every clean checkout — i.e. every CI run — fails at this stage,
+  so `win32u-unix`, `wine-pe-*`, DXMT, `xcodebuild` and the IPA can never run.
+- **Next path:** `build/wineserver/build.sh` now produces the base itself:
+  `build_base_from_source()` compiles every `.c` in the pinned submodule's
+  `server/Makefile.in` `SOURCES` (44 files at wine `9129e968`, counted from
+  the pinned file itself, which also lists `security.h` and three man pages) for iOS arm64
+  with the stage's own `CC_FLAGS`, under their natural member names
+  (`foo.c -> foo.o`) so the existing `PATCHED_FILES`/`REPLACEMENTS` swap and the
+  `llvm-objcopy` symbol-rename sweep still apply object-by-object.
+  Resolution order preserves local workflows: an existing `obj/` archive, then
+  a developer's `app/Madeira/libwineserver.a`, else the source build. `$0 base`
+  builds only the archive; a missing submodule names
+  `git submodule update --init wine` as the prerequisite; an unparseable
+  `SOURCES` list refuses to build an empty archive rather than satisfying the
+  file check. `tests/host/check-wineserver-base.py` runs the real script end to
+  end in a sandbox (stub `xcrun`/`ar`/`llvm-objcopy`) and pins the member set,
+  the object swap, the rename sweep and the failure diagnostics.
+- **Status:** repaired in the tree; the 44 real iOS compiles are **UNVERIFIED**
+  until a full workflow run. By design that run reports every failing
+  `server/*.c` at once (counted summary) instead of one per dispatch. The stage
+  is also dispatchable on its own (`only_stage=wineserver`, which runs the
+  `wine-macos` configure it needs first) so it can be checked without the
+  fex-ios/fex-arm64ec legs.
+
+## B-014: FEX diagnostics recorded as warnings — adjudicated, not "fixed"
+
+- **Evidence:** the `only_stage=all` log the user supplied (also summarised in
+  `docs/HANDOFF.md`) records, from the pinned FEX fork
+  (`f59cab95659e8add0c88f0c76ec1cf483c536dbf`): ARM64EC inline-assembly
+  warnings naming X23/X24/X28 in `LongJump.cpp`, a possible out-of-bounds
+  `Info->FileName[1]` in `Source/Windows/Common/ImageTracker.cpp:261`, unused
+  functions in `AllocWatch.cpp`/`CPUFeatures.cpp`, an unused CMake option
+  `ENABLE_OFFLINE_RUNTIME`, failed feature probes (`getcpu`, `gettid`, `tgkill`,
+  `statx`, `renameat2`) and range-v3's "unknown system iOS". None of these stop
+  the FEX stages: `libFEXCore.a`/`libFEXCore_Base.a` and `libarm64ecfex.dll`
+  were produced in that run.
+- **What was checked here (2026-10-15, sources read at the pin):**
+  `ImageTracker.cpp` was fetched from the pin and its guard read directly: the
+  access is `Info->FileNameLength == 4 && Info->FileName[0] == '.' &&
+  Info->FileName[1] == '.'`, so `FileName[1]` is only evaluated when the
+  reported length is two WCHARs of a name `NtQueryDirectoryFile` wrote into the
+  buffer — the warning is the compiler's view of the `WCHAR FileName[1]`
+  flexible-array declaration, not a reachable out-of-bounds read. The file's
+  `LoadAOTImages` also differs substantially from current FEX upstream `main`
+  (upstream carries `CacheFile`/`EnableLoadedSection` code this pin does not
+  have), so the pin's shape is a fork/revision gap, not a WinePhone edit — this
+  is the fork's own code, and no WinePhone change was made to it.
+- **Impact:** none demonstrated: an unfalsifiable warning was resolved to false
+  positive by reading the guard, and the platform-probe failures are expected
+  for a Linux-hosted cross build (`FEX_IOS_HOST`/Darwin probes).
+- **Next path:** the ARM64EC X23/X24/X28 assembly warnings are the one item that
+  can name real ABI misuse (those registers are reserved in the ARM64EC ABI),
+  so they need the fork's `LongJump.cpp` read against Microsoft's ARM64EC
+  register rules and a compile under the ARM64EC target to be confirmed either
+  way. Neither is possible in this Linux worktree (no ARM64EC toolchain, no
+  Windows host), and an unverifiable assembly rewrite is exactly what the
+  project's rules exclude, so it stays open **UNVERIFIED** with the file, the
+  registers and the warning named above.
+- **Status:** investigated; no change made; one item (ARM64EC asm registers)
+  explicitly still open.
+
+## B-015: the GnuTLS stage never placed the four archives the app links
+
+- **Evidence:** the Xcode target links 20 static archives
+  (`app/Madeira.xcodeproj/project.pbxproj`, `Frameworks` phase); 13 are bare
+  file references (`path = libgnutls.a;` and so on), which
+  `tools/validate_release_inputs.py` resolves as `app/Madeira/<name>` — the same
+  base that makes the project's `../../FEX/build-ios/...` references resolve,
+  and the base every other producer writes to
+  (`app/Madeira/libwineserver.a`, `libntdll_unix.a`, `libwin32u_unix.a`,
+  `libdxmt_combined.a`, `libmadeira_rppairing.a`, FFmpeg's four).
+  `build/gnutls-ios/build.sh` installed only to
+  `toolchains/gnutls-ios/lib/{libgnutls,libhogweed,libnettle,libgmp}.a` and had
+  no copy step, `.gitignore` had no entries for them under `app/Madeira/`, and
+  no other script names them: nothing put them where the link and the validator
+  look.
+- **Impact:** `scripts/build-ipa.sh` runs `tools/validate_release_inputs.py`
+  after every producer and before `xcodebuild`; with the four absent it exits 2
+  with `Missing linked archives: app/Madeira/libgnutls.a …`, and had the
+  validator been bypassed the link would fail on the same files. It is the same
+  producer/consumer class as B-013, one stage later; it could not be seen before
+  because no run ever reached past the wineserver stage.
+- **Next path:** the GnuTLS stage now copies `libgmp`, `libnettle`,
+  `libhogweed` and `libgnutls` from its prefix into `app/Madeira/` (dependency
+  order, `APP_DIR="$REPO_ROOT/app/Madeira"`), verifies each placed archive
+  exists and carries an arm64 slice with `lipo -archs`, and fails by name when
+  one is missing or not the iOS slice (rather than shipping a macOS or
+  simulator archive that links and then fails at load). `.gitignore` gained the
+  four paths, like the other rebuilt archives.
+  `tests/host/check-ipa-build-graph.py` now derives the bare-name set from the
+  project file itself and requires a producer that places each one in
+  `app/Madeira` — the check that fails on B-013's and B-015's shape.
+- **Status:** fixed in the tree; **UNVERIFIED** until a macOS run executes the
+  GnuTLS stage (no GnuTLS sources are built here) and the validator then sees
+  the four files.
+- **One ambiguity left to the next run:** the project's `Libraries` group has no
+  `path`, so Xcode resolves a bare reference from the project directory. The
+  relative `../../FEX/build-ios/...` references only resolve from
+  `app/Madeira/`, which is the base this stage (and the validator) now uses; but
+  `.gitignore` also carries `app/libwineserver.a` and `app/libwin32u_unix.a`,
+  the two archives that predate this work, so an earlier project revision
+  resolved them one level up. If the next run's `xcodebuild` reports a missing
+  archive after the validator passes, the resolution base is `app/` and the
+  correct repair is to make those file references explicit (or copy alongside,
+  as the older entries imply) — the log will name the path.

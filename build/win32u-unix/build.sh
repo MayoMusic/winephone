@@ -23,7 +23,31 @@ SUCCEEDED=0
 FAILED=0
 FAILED_FILES=""
 
+# FreeType, statically: build/freetype-ios/build.sh writes the archive into
+# <build>/libfreetype.a and its generated configuration headers into
+# <build>/include/freetype/config/{ftconfig.h,ftoption.h}. ft2build.h is a
+# source header in the clone, so both roots are named here, generated first
+# (same convention as build/ntdll-unix's dwrite_unixlib).
 FREETYPE_DIR="$REPO_ROOT/build/freetype-ios"
+FREETYPE_LIB="$FREETYPE_DIR/build/libfreetype.a"
+FREETYPE_INC_SRC="$REPO_ROOT/research/freetype/include"
+FREETYPE_INC_BUILD="$FREETYPE_DIR/build/include"
+
+# freetype_ios.c is the only translation unit here that includes FreeType, and
+# without it fonts are disabled silently ("WARNING: no libfreetype.a" below).
+# The producer is a separate, cached stage (build/freetype-ios/build.sh), so a
+# missing header is reported by name before the compiles, not as a lone FAILED.
+MISSING_REQUIRED=""
+for h in "$FREETYPE_INC_SRC/ft2build.h" \
+         "$FREETYPE_INC_BUILD/freetype/config/ftconfig.h" \
+         "$FREETYPE_INC_BUILD/freetype/config/ftoption.h"; do
+    [ -e "$h" ] || MISSING_REQUIRED="$MISSING_REQUIRED $h"
+done
+if [ -n "$MISSING_REQUIRED" ]; then
+    echo "error: the win32u-unix stage is missing required FreeType headers:$MISSING_REQUIRED" >&2
+    echo "  run build/freetype-ios/build.sh first (the workflow's FreeType step, or its cache)" >&2
+    exit 1
+fi
 
 compile_one() {
     local src=$1
@@ -119,12 +143,13 @@ for src in $WINE_SRC/dlls/win32u/*.c $WINE_SRC/dlls/win32u/dibdrv/*.c; do
             continue
             ;;
         freetype)
-            # Statically-linked freetype (build/freetype-ios). The wrapper
-            # re-defines HAVE_FT2BUILD_H itself; config_ios.h's #undefs win
-            # for every other TU.
+            # Statically-linked freetype (build/freetype-ios/build/libfreetype.a).
+            # The wrapper re-defines HAVE_FT2BUILD_H itself; config_ios.h's
+            # #undefs win for every other TU. Generated config first: this TU
+            # must see the ftconfig.h the library was compiled with.
             compile_one "$BUILD_DIR/freetype_ios.c" "freetype" \
-                -I"$FREETYPE_DIR/build/include" \
-                -I"$REPO_ROOT/research/freetype/include"
+                -I"$FREETYPE_INC_BUILD" \
+                -I"$FREETYPE_INC_SRC"
             continue
             ;;
     esac
@@ -149,12 +174,15 @@ echo "=== Building libwin32u_unix.a ==="
 ar rcs "$OBJ_DIR/libwin32u_unix.a" "$OBJ_DIR"/*.o
 
 # Merge the static freetype so the app link needs no project changes.
-if [ -f "$FREETYPE_DIR/build/libfreetype.a" ]; then
+# Not a warning that can be ignored: the stage above required its headers, so an
+# absent archive means the two dirs do not belong to the same build.
+if [ -f "$FREETYPE_LIB" ]; then
     libtool -static -o "$OBJ_DIR/libwin32u_unix.a" \
-        "$OBJ_DIR/libwin32u_unix.a" "$FREETYPE_DIR/build/libfreetype.a" 2>/dev/null
-    echo "merged libfreetype.a"
+        "$OBJ_DIR/libwin32u_unix.a" "$FREETYPE_LIB" 2>/dev/null
+    echo "merged $FREETYPE_LIB"
 else
-    echo "WARNING: no libfreetype.a — fonts will be disabled"
+    echo "error: $FREETYPE_LIB is missing; rerun build/freetype-ios/build.sh" >&2
+    exit 1
 fi
 
 echo "Copying to app..."

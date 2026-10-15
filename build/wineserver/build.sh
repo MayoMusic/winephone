@@ -12,6 +12,14 @@ SHIMS_DIR="$REPO_ROOT/build/ntdll-unix/shims"
 OBJ_DIR="$BUILD_DIR/obj"
 mkdir -p "$OBJ_DIR"
 
+# The base archive (every wine/server object as the submodule defines it) is
+# resolved lazily by ensure_base_archive() below. It used to be required as a
+# pre-existing local artifact (app/Madeira/libwineserver.a, git-ignored, never
+# committed, no producer anywhere in the repository), so every clean checkout --
+# every CI run -- died here with "ERROR: No base libwineserver.a found".
+# $0 base builds just that archive; $0 (all) builds it when absent and then
+# swaps in the iOS-patched objects.
+
 CC_FLAGS=(
     -arch arm64 -isysroot "$SDK" -miphoneos-version-min=17.0 -O2
     -I"$WINE_SRC/include" -I"$WINE_SRC/include/wine"
@@ -38,76 +46,94 @@ CC_FLAGS=(
 compile_one() {
     local src=$1
     local name=$2
-    local outdir=${3:-$OBJ_DIR}
     echo -n "  $name... "
-    if xcrun -sdk iphoneos clang "${CC_FLAGS[@]}" -c "$src" -o "$outdir/$name.o" 2>"$outdir/err-$name.txt"; then
+    if xcrun -sdk iphoneos clang "${CC_FLAGS[@]}" -c "$src" -o "$OBJ_DIR/$name.o" 2>"$OBJ_DIR/err-$name.txt"; then
         echo "OK"
     else
-        echo "FAILED (see $outdir/err-$name.txt)"
-        cat "$outdir/err-$name.txt"
+        echo "FAILED (see $OBJ_DIR/err-$name.txt)"
+        cat "$OBJ_DIR/err-$name.txt"
         return 1
     fi
 }
 
-# Server sources proven not to build for iOS. Every entry must be justified by
-# an observed compiler error in a CI log, recorded in BLOCKERS.md. Empty on
-# first use; a clean checkout needs no entry because all 44 server sources are
-# compiled below.
-BASE_SKIP=()
+SERVER_MAKEFILE="$WINE_SRC/server/Makefile.in"
 
-# Build the base archive from Wine's own server sources.
-#
-# Why this exists: this script patches objects INTO a prebuilt base archive.
-# That base is `app/Madeira/libwineserver.a`, which Madeira git-ignores
-# (Madeira .gitignore:33, commit 279fd0f) and never produces -- Wine's
-# wine/server/Makefile.in builds only the `wineserver` program, not a library,
-# and no script in the Madeira tree writes it. docs/BUILDING.md calls the step
-# "Verified on the development machine", i.e. verified only where that untracked
-# artifact existed. A clean checkout therefore stops here with
-# "ERROR: No base libwineserver.a found" (WinePhone CI run 38727641709).
-#
-# Compiling the same sources with the same CC_FLAGS keeps base and patched
-# objects flag-identical, which the objcopy rename sweep and the `ar` step both
-# depend on. All sources go in, including the ones later replaced, because the
-# replacement step is `ar d old` + `ar r new` and expects the original member.
-build_base_archive() {
-    local base_dir="$BUILD_DIR/base"
-    rm -rf "$base_dir"
-    mkdir -p "$base_dir"
-    local failed=() name="" src="" skip=""
-    for src in "$WINE_SRC"/server/*.c; do
-        name=$(basename "$src" .c)
-        skip=""
-        for s in ${BASE_SKIP+"${BASE_SKIP[@]}"}; do
-            [ "$s" = "$name" ] && skip="1"
-        done
-        if [ -n "$skip" ]; then
-            echo "  $name... SKIPPED (BASE_SKIP)"
-            continue
-        fi
-        compile_one "$src" "$name" "$base_dir" || failed+=("$name")
-    done
-    if [ ${#failed[@]} -gt 0 ]; then
-        echo ""
-        echo "ERROR: base libwineserver.a incomplete, ${#failed[@]} server source(s) failed:"
-        printf '  %s\n' "${failed[@]}" | sort
-        echo "Per-file compiler output is in $base_dir/err-*.txt."
-        echo "Add each name to BASE_SKIP with its error, or fix the build."
+# Build the base archive from the pinned submodule: every .c in
+# server/Makefile.in's SOURCES, compiled for iOS arm64 with the same CC_FLAGS
+# the patched files use, packed under its natural member name (foo.c -> foo.o)
+# so the REPLACEMENTS loop below can delete and swap the patched ones by name.
+# The member name matters: a base object stored under any other name would
+# survive the swaps and duplicate its symbols against the patched copy at the
+# final app link.
+build_base_from_source() {
+    if [ ! -f "$SERVER_MAKEFILE" ]; then
+        echo "error: $SERVER_MAKEFILE is absent (the wine submodule is not checked out)" >&2
+        echo "  libwineserver.a has no prebuilt copy in this repository; its base is" >&2
+        echo "  built here from the pinned wine submodule's server/ sources. Fetch it:" >&2
+        echo "    git submodule update --init wine    (scripts/bootstrap.sh does this)" >&2
         exit 1
     fi
+    # SOURCES = <file> \ ... <file>  — continuation lines end in a backslash;
+    # the list also names headers and man pages, which are not compiled.
+    local sources
+    sources="$(awk '
+        function emit(s) { gsub(/[ \t]/, "", s); if (s != "") print s }
+        /^SOURCES =/ { grab = 1; sub(/^SOURCES =/, ""); if (NF) emit($0); next }
+        grab {
+            line = $0
+            if (line ~ /\\[ \t]*$/) { sub(/\\[ \t]*$/, "", line); emit(line); next }
+            emit(line); grab = 0
+        }
+    ' "$SERVER_MAKEFILE" | grep -E '\.c$' || true)"
+    if [ -z "$sources" ]; then
+        echo "error: no .c sources parsed from $SERVER_MAKEFILE (SOURCES list)" >&2
+        echo "  the archive must track the submodule's server build; refusing to build" >&2
+        echo "  an empty libwineserver.a that would only satisfy a file check" >&2
+        exit 1
+    fi
+    echo "=== Building base libwineserver.a from $SERVER_MAKEFILE ==="
+    local base_dir="$OBJ_DIR/base"
+    rm -rf "$base_dir"
+    mkdir -p "$base_dir"
+    local ok=0 failed=0 src obj
+    # Compile everything, then report: one CI run shows every broken server
+    # file instead of one per dispatch (same pattern as build/ntdll-unix).
+    for src in $sources; do
+        obj="$base_dir/${src%.c}.o"
+        printf '  %s... ' "$src"
+        if xcrun -sdk iphoneos clang "${CC_FLAGS[@]}" -c "$WINE_SRC/server/$src" -o "$obj" 2>"$base_dir/err-$src.txt"; then
+            echo "OK"
+            ok=$((ok + 1))
+        else
+            echo "FAILED (see $base_dir/err-$src.txt)"
+            sed -n '1,40p' "$base_dir/err-$src.txt"
+            failed=$((failed + 1))
+        fi
+    done
+    echo "base compile: $ok succeeded, $failed failed"
+    if [ "$failed" -ne 0 ]; then
+        echo "error: $failed wine/server source(s) failed to compile for iOS arm64" >&2
+        exit 1
+    fi
+    rm -f "$OBJ_DIR/libwineserver.a"
     ar rcs "$OBJ_DIR/libwineserver.a" "$base_dir"/*.o
-    echo "  base archive: $(ls -1 "$base_dir"/*.o | wc -l | tr -d ' ') objects, $(wc -c < "$OBJ_DIR/libwineserver.a" | tr -d ' ') bytes"
+    echo "  base archive: $OBJ_DIR/libwineserver.a ($(wc -c < "$OBJ_DIR/libwineserver.a" | tr -d ' ') bytes, $(printf '%s\n' $sources | wc -l | tr -d ' ') members)"
 }
 
-# Copy the base library if we don't have one yet
-if [ ! -f "$OBJ_DIR/libwineserver.a" ]; then
-    if [ -f "$APP_LIB" ]; then
+# Resolve the base archive the stage will patch:
+#   1. one already in OBJ_DIR            (a resumed local build)
+#   2. app/Madeira/libwineserver.a       (a developer's earlier build, kept)
+#   3. built from the pinned submodule    (clean checkout / CI)
+ensure_base_archive() {
+    if [ -f "$OBJ_DIR/libwineserver.a" ]; then
+        echo "base libwineserver.a: reusing $OBJ_DIR/libwineserver.a"
+    elif [ -f "$APP_LIB" ]; then
+        echo "base libwineserver.a: copied from $APP_LIB (existing local artifact)"
         cp "$APP_LIB" "$OBJ_DIR/libwineserver.a"
     else
-        echo "=== Building base libwineserver.a from wine/server sources ==="
-        build_base_archive
+        build_base_from_source
     fi
-fi
+}
 
 # Patched files: name:source_file:replaces_in_archive
 PATCHED_FILES=(
@@ -165,6 +191,19 @@ PATCHED_FILES=(
     "storage_device_ios:storage_device_ios.c:storage_device_ios.o"
 )
 
+case "${1:-all}" in
+    base)
+        # Producer mode: just the unpatched archive from the submodule sources.
+        ensure_base_archive
+        echo "Done! base libwineserver.a: $(wc -c < "$OBJ_DIR/libwineserver.a" | tr -d ' ') bytes"
+        exit 0
+        ;;
+esac
+
+# Every remaining mode ends in the REPLACEMENTS/rename sweep below, which
+# patches the base archive, so it must exist before anything is compiled.
+ensure_base_archive
+
 echo "=== Building kill wrapper (without kill macro) ==="
 echo -n "  wineserver_ios_kill... "
 # Compile WITHOUT -include wineserver_ios_kill.h to avoid recursive macro
@@ -198,7 +237,7 @@ case "${1:-all}" in
         done
         ;;
     *)
-        echo "Usage: $0 [all|request|main|mach|unicode]"
+        echo "Usage: $0 [base|all|request|main|mach|unicode]"
         exit 1
         ;;
 esac
