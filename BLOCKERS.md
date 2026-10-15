@@ -214,3 +214,38 @@
   registers and the warning named above.
 - **Status:** investigated; no change made; one item (ARM64EC asm registers)
   explicitly still open.
+
+## B-015: the GnuTLS stage never placed the four archives the app links
+
+- **Evidence:** the Xcode target links 20 static archives
+  (`app/Madeira.xcodeproj/project.pbxproj`, `Frameworks` phase); 13 are bare
+  file references (`path = libgnutls.a;` and so on), which
+  `tools/validate_release_inputs.py` resolves as `app/Madeira/<name>` — the same
+  base that makes the project's `../../FEX/build-ios/...` references resolve,
+  and the base every other producer writes to
+  (`app/Madeira/libwineserver.a`, `libntdll_unix.a`, `libwin32u_unix.a`,
+  `libdxmt_combined.a`, `libmadeira_rppairing.a`, FFmpeg's four).
+  `build/gnutls-ios/build.sh` installed only to
+  `toolchains/gnutls-ios/lib/{libgnutls,libhogweed,libnettle,libgmp}.a` and had
+  no copy step, `.gitignore` had no entries for them under `app/Madeira/`, and
+  no other script names them: nothing put them where the link and the validator
+  look.
+- **Impact:** `scripts/build-ipa.sh` runs `tools/validate_release_inputs.py`
+  after every producer and before `xcodebuild`; with the four absent it exits 2
+  with `Missing linked archives: app/Madeira/libgnutls.a …`, and had the
+  validator been bypassed the link would fail on the same files. It is the same
+  producer/consumer class as B-013, one stage later; it could not be seen before
+  because no run ever reached past the wineserver stage.
+- **Next path:** the GnuTLS stage now copies `libgmp`, `libnettle`,
+  `libhogweed` and `libgnutls` from its prefix into `app/Madeira/` (dependency
+  order, `APP_DIR="$REPO_ROOT/app/Madeira"`), verifies each placed archive
+  exists and carries an arm64 slice with `lipo -archs`, and fails by name when
+  one is missing or not the iOS slice (rather than shipping a macOS or
+  simulator archive that links and then fails at load). `.gitignore` gained the
+  four paths, like the other rebuilt archives.
+  `tests/host/check-ipa-build-graph.py` now derives the bare-name set from the
+  project file itself and requires a producer that places each one in
+  `app/Madeira` — the check that fails on B-013's and B-015's shape.
+- **Status:** fixed in the tree; **UNVERIFIED** until a macOS run executes the
+  GnuTLS stage (no GnuTLS sources are built here) and the validator then sees
+  the four files.

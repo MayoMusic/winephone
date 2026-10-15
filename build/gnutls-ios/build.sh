@@ -108,7 +108,38 @@ if [ ! -f "$OBJ_DIR/gnutls.done" ]; then
 fi
 echo "GnuTLS ok"
 
+# ------------------------------------------------------------------ install
+# The app target links these four from app/Madeira/ (git-ignored, like
+# libntdll_unix.a / libwin32u_unix.a / the FFmpeg archives), in dependency
+# order gmp -> nettle+hogweed -> gnutls. The Xcode file references are bare
+# names resolved against app/Madeira — the same base
+# tools/validate_release_inputs.py uses before xcodebuild — so a GnuTLS tree
+# left only in $PREFIX/lib is a linked archive that does not exist, which that
+# validator reports as "Missing linked archives" and the link would fail on.
+APP_DIR="$REPO_ROOT/app/Madeira"
+GNUTLS_LIBS=(libgmp libnettle libhogweed libgnutls)
+for lib in "${GNUTLS_LIBS[@]}"; do
+    src="$PREFIX/lib/$lib.a"
+    [ -f "$src" ] || { echo "error: $src was not installed by the build" >&2; exit 1; }
+    cp "$src" "$APP_DIR/$lib.a"
+done
+
 echo
 echo "=== static libs in $PREFIX/lib ==="
 ls -la "$PREFIX/lib/"*.a
 lipo -info "$PREFIX/lib/libgnutls.a" 2>/dev/null || true
+
+# Verify what the link will actually read: the file is there and it is the iOS
+# arm64 slice the target links (a macOS or simulator archive would link and
+# then fail at load time, which is exactly what must not be shipped).
+echo "=== linked into the app from app/Madeira ==="
+for lib in "${GNUTLS_LIBS[@]}"; do
+    dst="$APP_DIR/$lib.a"
+    [ -f "$dst" ] || { echo "error: $dst is absent after install" >&2; exit 1; }
+    archs="$(lipo -archs "$dst" 2>/dev/null || true)"
+    case "$archs" in
+        *arm64*) ;;
+        *) echo "error: $dst carries no arm64 slice (lipo -archs: '${archs:-none}')" >&2; exit 1 ;;
+    esac
+    printf '  app/Madeira/%s.a (%s)\n' "$lib" "$archs"
+done

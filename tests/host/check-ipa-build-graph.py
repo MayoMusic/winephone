@@ -189,6 +189,50 @@ check("git submodule update --init --depth 1 wine" in submodules and "wineserver
 check('IPA_PRESENT=0' in wn and "exit 0" in wn,
       "it records IPA_PRESENT=0 and stops there, like every other stage-only dispatch")
 
+# ------------------------------------------------------------- linked-archive producers
+# tools/validate_release_inputs.py resolves every `.a` path in the Xcode project
+# against app/Madeira and runs before xcodebuild, so each archive the app links
+# must be *placed* there by the stage that builds it. app/Madeira/libwineserver.a
+# was one such reference with no producer at all (B-013); the GnuTLS stage left
+# its four in toolchains/gnutls-ios/lib, which no link and no validator looks at.
+PROJECT = (ROOT / "app/Madeira.xcodeproj/project.pbxproj").read_text(encoding="utf-8")
+VALIDATOR_PY = (ROOT / "tools/validate_release_inputs.py").read_text(encoding="utf-8")
+GNUTLS = (ROOT / "build/gnutls-ios/build.sh").read_text(encoding="utf-8")
+bare = sorted({r for r in re.findall(r'path = "?([^";]+\.a)"?;', PROJECT) if "/" not in r})
+# name -> (script, the tokens that prove it places that archive in app/Madeira)
+PLACERS = {
+    "libwineserver.a": ("build/wineserver/build.sh", ["app/Madeira/libwineserver.a"]),
+    "libntdll_unix.a": ("build/ntdll-unix/build.sh", ["app/Madeira/libntdll_unix.a"]),
+    "libwin32u_unix.a": ("build/win32u-unix/build.sh", ["app/Madeira/libwin32u_unix.a"]),
+    "libdxmt_combined.a": ("build/dxmt-ios/build.sh", ["app/Madeira/libdxmt_combined.a"]),
+    "libmadeira_rppairing.a": ("build/rppairing-ios/build.sh", ["app/Madeira/libmadeira_rppairing.a"]),
+    # FFmpeg and GnuTLS install a list of archives into APP_DIR="...app/Madeira"
+    # rather than naming each destination path.
+    "libavformat.a": ("build/ffmpeg/build.sh", ["avformat", 'cp "$PREFIX/lib/$lib.a" "$APP_DIR/$lib.a"',
+                                                'APP_DIR="$REPO_ROOT/app/Madeira"']),
+    "libavcodec.a": ("build/ffmpeg/build.sh", ["avcodec", 'cp "$PREFIX/lib/$lib.a" "$APP_DIR/$lib.a"']),
+    "libswresample.a": ("build/ffmpeg/build.sh", ["swresample", 'cp "$PREFIX/lib/$lib.a" "$APP_DIR/$lib.a"']),
+    "libavutil.a": ("build/ffmpeg/build.sh", ["avutil", 'cp "$PREFIX/lib/$lib.a" "$APP_DIR/$lib.a"']),
+    "libgnutls.a": ("build/gnutls-ios/build.sh", ["libgnutls", 'cp "$src" "$APP_DIR/$lib.a"']),
+    "libhogweed.a": ("build/gnutls-ios/build.sh", ["libhogweed", 'cp "$src" "$APP_DIR/$lib.a"']),
+    "libnettle.a": ("build/gnutls-ios/build.sh", ["libnettle", 'cp "$src" "$APP_DIR/$lib.a"']),
+    "libgmp.a": ("build/gnutls-ios/build.sh", ["libgmp", 'cp "$src" "$APP_DIR/$lib.a"']),
+}
+unaccounted = sorted(set(bare) - set(PLACERS))
+check(bare and not unaccounted,
+      "every archive the Xcode target links by bare name has a stage that places it in "
+      "app/Madeira (unaccounted: %s)" % (", ".join(unaccounted) or "none"))
+for name, (script, needles) in sorted(PLACERS.items()):
+    text = (ROOT / script).read_text(encoding="utf-8")
+    check(all(n in text for n in needles),
+          "%s is placed in app/Madeira by %s" % (name, script))
+check("app / rel" in VALIDATOR_PY and "Missing linked archives" in VALIDATOR_PY,
+      "the pre-xcodebuild validator resolves those references against app/Madeira too")
+check(ordered(IPA, "validate_release_inputs.py", "run_stage xcodebuild"),
+      "and runs after every producer and before xcodebuild")
+check("lipo -archs" in GNUTLS and "arm64" in GNUTLS and "carries no arm64 slice" in GNUTLS,
+      "the GnuTLS stage verifies each placed archive is the iOS arm64 slice the app links")
+
 # ------------------------------------------------------------- packaged artifact
 # The packaging step validates through tools/validate-ipa.sh, which is itself
 # exercised end to end by tests/host/check-ipa-validation.py.

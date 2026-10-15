@@ -68,6 +68,14 @@ path. The script has not yet run on macOS, so clean-build success is unproven.
   `research/freetype/include/ft2build.h`, and fails if any is absent.
   `build/ntdll-unix/build.sh` and `build/win32u-unix/build.sh` refuse to build
   their font translation units without those headers.
+- **GnuTLS archives.** `build/gnutls-ios/build.sh` installs `libgnutls.a`,
+  `libhogweed.a`, `libnettle.a` and `libgmp.a` into `app/Madeira/` — the base
+  the Xcode file references and `tools/validate_release_inputs.py` resolve
+  against, and the same base the wineserver, ntdll, win32u, DXMT, rppairing and
+  FFmpeg stages write to — and fails when one is missing or carries no arm64
+  slice. No stage placed them before (B-015): the pre-xcodebuild validator
+  would have reported `Missing linked archives` on the first run to get that
+  far.
 - **Wine server base archive.** `build/wineserver/build.sh` builds its own
   base `libwineserver.a` from the pinned submodule's `server/Makefile.in`
   (`build_base_from_source`), then swaps in the iOS-patched objects as before;

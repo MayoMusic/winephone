@@ -243,6 +243,19 @@ not log text). Three runs exist past the 6bde730/3daa133 repairs:
   selection step now asserts the pair (Xcode exactly 26.6, SDK path present,
   SDK major ≥ the `-miphoneos-version-min=17.0` the stages compile with)
   instead of printing them, and fails by name when a future image moves.
+- **The next blocker in the same class (B-015):** the Xcode target links 20
+  archives; 13 of them are bare names that
+  `tools/validate_release_inputs.py` resolves against `app/Madeira` before
+  `xcodebuild`, and the GnuTLS stage was the one producer that left its four
+  (`libgnutls`, `libhogweed`, `libnettle`, `libgmp`) only in
+  `toolchains/gnutls-ios/lib`. That validator would have exited 2 with
+  `Missing linked archives` on the first run that got that far — the same
+  producer/consumer defect as B-013, one stage later, invisible until the
+  wineserver stage stopped killing the run. The stage now installs them into
+  `app/Madeira/` in dependency order and verifies each is the iOS arm64 slice;
+  `check-ipa-build-graph.py` derives the bare-name set from the project file
+  itself and requires a placing producer for every entry, so this class cannot
+  come back silently.
 - The workflow's full-vs-stage-only conditions are now one predicate
   (`(inputs.only_stage || 'all')`), so no step keys off a named stage and the
   `push` event (unset input) cannot be mistaken for a stage-only run;

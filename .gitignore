@@ -35,6 +35,12 @@ app/libwineserver.a
 app/Madeira/libdxmt_combined.a
 app/Madeira/libwin32u_unix.a
 app/libwin32u_unix.a
+# GnuTLS stack (build/gnutls-ios/build.sh): the four archives the app links
+# from app/Madeira, installed there by that stage
+app/Madeira/libgnutls.a
+app/Madeira/libhogweed.a
+app/Madeira/libnettle.a
+app/Madeira/libgmp.a
 # On-device pairing (build/rppairing-ios/build.sh)
 app/Madeira/libmadeira_rppairing.a
 build/rppairing-ios/target/
