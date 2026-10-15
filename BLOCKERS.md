@@ -177,6 +177,32 @@
   is also dispatchable on its own (`only_stage=wineserver`, which runs the
   `wine-macos` configure it needs first) so it can be checked without the
   fex-ios/fex-arm64ec legs.
+- **ABI hazard this repair removes — found by reading the fork, not documented
+  elsewhere.** `wine/server/thread.h:147-148` carries
+  `C_ASSERT( offsetof(struct thread, completion_wait) == 640 )` and
+  `C_ASSERT( offsetof(struct thread, token) == 600 )` under `WINE_IOS`. The
+  comment at `:135-146` states the archive is expected to hold **27 objects that
+  `build.sh` never recompiles** (`completion.o`, `event.o`, `mutex.o`, `timer.o`,
+  `handle.o`, `token.o`, ...), that those objects read `struct thread` at the
+  offsets they were compiled with, and that inserting a field anywhere above
+  `ios_mach_suspended` moved `completion_wait` 640 -> 648 and made
+  `cleanup_thread_completion()` dereference garbage on every thread teardown
+  (fault `0x110e5e0007b5`) — undetected, because the `objcopy` repack refreshes
+  every member's mtime so the archive still looked freshly built. It then gives
+  the instruction that this repair follows: "either move your new field to the
+  end of the struct, **or rebuild every object in the archive from these
+  headers** and then update it."
+  Rebuilding all 44 `SOURCES` from the pinned headers with one flag set is that
+  second option, so every member agrees on the layout by construction and the
+  `C_ASSERT`s hold by definition. Mixing a fresh `thread.o` with a 27-object
+  archive built from older headers is exactly the failure above, and the old
+  producer could not have been caught by the mtime. Consequences to record once
+  the stage passes: the "27 prebuilt objects" wording at `thread.h:103` and
+  `:137` becomes stale and should be corrected with the new count, and
+  `SOURCES` was confirmed to hold exactly 44 `.c` entries with none on disk
+  missing from the list. VERIFY the two `C_ASSERT` values on the arm64 iOS
+  target: `offsetof` depends on the target ABI, so this host's x86-64 numbers
+  prove nothing.
 
 ## B-014: FEX diagnostics recorded as warnings — adjudicated, not "fixed"
 
