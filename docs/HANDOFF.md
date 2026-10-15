@@ -151,3 +151,19 @@ Fetch the completed log for run `38643156359` once and inspect the first FEX con
 **Current blocker:** the stage cannot be re-run from this worktree (no dispatch, no logs), and the new make-based header generation plus the unix compiles are **UNVERIFIED**.
 
 **Next step:** dispatch `only_stage=wine-ntdll-unix` once more and paste (a) the `ntdll unix header diagnostic` block, (b) the `widl-generated public headers` block (or the `make -C include` failure tail), and (c) the `Results:`/`Failed:` line. Those three decide whether the generation works and whether the compiles then pass.
+
+### Resumed with log access (2026-10-16)
+
+**Capability change:** `gh` is authenticated as `MayoMusic` (`repo`, `workflow`). Logs can now be read directly and workflows dispatched, which the previous session could not do. Everything below comes from downloaded logs, not a user report.
+
+**Answered:** `cache restore` is **VERIFIED** — run `38727641709` printed `Pinned toolchain cache exact-key hit: true` and `Pinned FreeType cache exact-key hit: true`. A full run is ~13 min.
+
+**B-008/B-009/B-010 closed by evidence.** Run `38727641709` reached and passed `gnutls`, `ffmpeg`, `fex-ios`, `fex-arm64ec`, `wine-macos` configure and widl header generation; `wine-ntdll-unix` reported `Results: 37 succeeded, 0 failed` and produced `libntdll_unix.a` (2,373,192 bytes). It failed on the next stage's first line. The Wine configure "development files not found" lines are optional-feature probes, not the failure.
+
+**Current blocker: B-011.** `ERROR: No base libwineserver.a found`. `app/Madeira/libwineserver.a` is git-ignored by Madeira (`.gitignore:33`) and produced by nothing — `wine/server/Makefile.in` builds only the `wineserver` program, and `git grep libwineserver` over all of Madeira at `279fd0f` hits only `build/wineserver/build.sh`, `.gitignore` and three `app/` references. Madeira's own clean checkout cannot pass this step either.
+
+**Done in this change set:** `build/wineserver/build.sh` builds the base from all 44 `wine/server/*.c` with the existing `CC_FLAGS` when no base exists, with a `BASE_SKIP` array and an all-failures-at-once failure path; `.gitignore` ignores `build/wineserver/base/`; `scripts/build-ipa.sh` and the workflow gain an `only_stage=wineserver` path (wine submodule + `wine-macos` configure + wineserver only).
+
+**Not verified:** whether all 44 sources compile for iOS. `BASE_SKIP` is expected to need at least one entry. Local checks only: `bash -n` on both scripts, workflow YAML parse, the `set -e` empty-array path, and the 44-source failure path under a stub `xcrun`.
+
+**Next step:** dispatch `only_stage=wineserver` once. If it reports `ERROR: base libwineserver.a incomplete`, add exactly those names to `BASE_SKIP` with their compiler errors — do not guess the list. If the stage passes, the next unproven stage is `win32u-unix`.

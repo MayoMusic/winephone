@@ -27,6 +27,13 @@ build/xcode-derived/
 FEX/build-ios/
 build/ntdll-unix/obj/
 build/wineserver/obj/
+build/wineserver/base/
+
+# Local scratch: a nested pristine Madeira clone used only for cross-checking,
+# and CI logs pulled with `gh run view --log`. Both are reproducible from the
+# pinned commits and the run IDs recorded in PROGRESS.md.
+upstream/
+evidence/
 
 # Compiled libraries (rebuilt from build scripts)
 app/Madeira/libntdll_unix.a

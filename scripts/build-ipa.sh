@@ -9,8 +9,8 @@ OUT="$(cd "$OUT" && pwd)"
 start=$SECONDS
 ONLY_STAGE="${WINEPHONE_ONLY_STAGE:-all}"
 case "$ONLY_STAGE" in
-  all|fex-ios|wine-ntdll-unix) ;;
-  *) echo "error: unsupported WINEPHONE_ONLY_STAGE '$ONLY_STAGE' (use all, fex-ios or wine-ntdll-unix)" >&2; exit 2 ;;
+  all|fex-ios|wine-ntdll-unix|wineserver) ;;
+  *) echo "error: unsupported WINEPHONE_ONLY_STAGE '$ONLY_STAGE' (use all, fex-ios, wine-ntdll-unix or wineserver)" >&2; exit 2 ;;
 esac
 
 run_stage() {
@@ -38,8 +38,8 @@ if [[ "$ONLY_STAGE" == fex-ios ]]; then
     External/vixl External/fmt External/range-v3 External/rpmalloc \
     External/unordered_dense External/xxhash External/jemalloc_glibc \
     Source/Common/cpp-optparse
-elif [[ "$ONLY_STAGE" == wine-ntdll-unix ]]; then
-  echo "wine-ntdll-unix-only mode: skipping LLVM/toolchain bootstrap."
+elif [[ "$ONLY_STAGE" == wine-ntdll-unix || "$ONLY_STAGE" == wineserver ]]; then
+  echo "$ONLY_STAGE-only mode: skipping LLVM/toolchain bootstrap."
   git submodule update --init --depth 1 wine
 elif [[ "${WINEPHONE_SKIP_BOOTSTRAP:-0}" == 1 ]]; then
   echo "Bootstrap already completed in the workflow."
@@ -57,6 +57,18 @@ fi
   printf 'DXMT: '; git -C "$ROOT/dxmt" rev-parse HEAD 2>/dev/null || echo "(not initialized)"
   git submodule status --recursive || true
 } | tee -a "$OUT/build-environment.txt"
+
+if [[ "$ONLY_STAGE" == wineserver ]]; then
+  export PATH="$ROOT/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin:$PATH"
+  # build/wineserver/build.sh needs only wine/build-macos/include/config.h from
+  # the configured Wine tree; it links no other stage's product, so GnuTLS,
+  # FFmpeg and libntdll_unix.a are not prerequisites for this stage.
+  run_stage wine-macos bash "$ROOT/build/wine-macos/configure.sh"
+  run_stage wineserver bash "$ROOT/build/wineserver/build.sh"
+  echo "Build duration: $((SECONDS-start)) seconds"
+  echo "Build duration seconds: $((SECONDS-start))" >> "$OUT/build-environment.txt"
+  exit 0
+fi
 
 if [[ "$ONLY_STAGE" == wine-ntdll-unix ]]; then
   export PATH="$ROOT/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin:$PATH"

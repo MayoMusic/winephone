@@ -12,16 +12,6 @@ SHIMS_DIR="$REPO_ROOT/build/ntdll-unix/shims"
 OBJ_DIR="$BUILD_DIR/obj"
 mkdir -p "$OBJ_DIR"
 
-# Copy the base library if we don't have one yet
-if [ ! -f "$OBJ_DIR/libwineserver.a" ]; then
-    if [ -f "$APP_LIB" ]; then
-        cp "$APP_LIB" "$OBJ_DIR/libwineserver.a"
-    else
-        echo "ERROR: No base libwineserver.a found"
-        exit 1
-    fi
-fi
-
 CC_FLAGS=(
     -arch arm64 -isysroot "$SDK" -miphoneos-version-min=17.0 -O2
     -I"$WINE_SRC/include" -I"$WINE_SRC/include/wine"
@@ -48,15 +38,76 @@ CC_FLAGS=(
 compile_one() {
     local src=$1
     local name=$2
+    local outdir=${3:-$OBJ_DIR}
     echo -n "  $name... "
-    if xcrun -sdk iphoneos clang "${CC_FLAGS[@]}" -c "$src" -o "$OBJ_DIR/$name.o" 2>"$OBJ_DIR/err-$name.txt"; then
+    if xcrun -sdk iphoneos clang "${CC_FLAGS[@]}" -c "$src" -o "$outdir/$name.o" 2>"$outdir/err-$name.txt"; then
         echo "OK"
     else
-        echo "FAILED (see $OBJ_DIR/err-$name.txt)"
-        cat "$OBJ_DIR/err-$name.txt"
+        echo "FAILED (see $outdir/err-$name.txt)"
+        cat "$outdir/err-$name.txt"
         return 1
     fi
 }
+
+# Server sources proven not to build for iOS. Every entry must be justified by
+# an observed compiler error in a CI log, recorded in BLOCKERS.md. Empty on
+# first use; a clean checkout needs no entry because all 44 server sources are
+# compiled below.
+BASE_SKIP=()
+
+# Build the base archive from Wine's own server sources.
+#
+# Why this exists: this script patches objects INTO a prebuilt base archive.
+# That base is `app/Madeira/libwineserver.a`, which Madeira git-ignores
+# (Madeira .gitignore:33, commit 279fd0f) and never produces -- Wine's
+# wine/server/Makefile.in builds only the `wineserver` program, not a library,
+# and no script in the Madeira tree writes it. docs/BUILDING.md calls the step
+# "Verified on the development machine", i.e. verified only where that untracked
+# artifact existed. A clean checkout therefore stops here with
+# "ERROR: No base libwineserver.a found" (WinePhone CI run 38727641709).
+#
+# Compiling the same sources with the same CC_FLAGS keeps base and patched
+# objects flag-identical, which the objcopy rename sweep and the `ar` step both
+# depend on. All sources go in, including the ones later replaced, because the
+# replacement step is `ar d old` + `ar r new` and expects the original member.
+build_base_archive() {
+    local base_dir="$BUILD_DIR/base"
+    rm -rf "$base_dir"
+    mkdir -p "$base_dir"
+    local failed=() name="" src="" skip=""
+    for src in "$WINE_SRC"/server/*.c; do
+        name=$(basename "$src" .c)
+        skip=""
+        for s in ${BASE_SKIP+"${BASE_SKIP[@]}"}; do
+            [ "$s" = "$name" ] && skip="1"
+        done
+        if [ -n "$skip" ]; then
+            echo "  $name... SKIPPED (BASE_SKIP)"
+            continue
+        fi
+        compile_one "$src" "$name" "$base_dir" || failed+=("$name")
+    done
+    if [ ${#failed[@]} -gt 0 ]; then
+        echo ""
+        echo "ERROR: base libwineserver.a incomplete, ${#failed[@]} server source(s) failed:"
+        printf '  %s\n' "${failed[@]}" | sort
+        echo "Per-file compiler output is in $base_dir/err-*.txt."
+        echo "Add each name to BASE_SKIP with its error, or fix the build."
+        exit 1
+    fi
+    ar rcs "$OBJ_DIR/libwineserver.a" "$base_dir"/*.o
+    echo "  base archive: $(ls -1 "$base_dir"/*.o | wc -l | tr -d ' ') objects, $(wc -c < "$OBJ_DIR/libwineserver.a" | tr -d ' ') bytes"
+}
+
+# Copy the base library if we don't have one yet
+if [ ! -f "$OBJ_DIR/libwineserver.a" ]; then
+    if [ -f "$APP_LIB" ]; then
+        cp "$APP_LIB" "$OBJ_DIR/libwineserver.a"
+    else
+        echo "=== Building base libwineserver.a from wine/server sources ==="
+        build_base_archive
+    fi
+fi
 
 # Patched files: name:source_file:replaces_in_archive
 PATCHED_FILES=(
