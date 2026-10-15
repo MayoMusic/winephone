@@ -67,3 +67,36 @@ binaries were removed from the WinePhone release tree; the macOS Metal shader
 compiler remains an Xcode tool used by DXMT. No D3DMetal/GPTK assets are used.
 Winlator and PPSSPP sparse study checkouts live under the temporary directory,
 not in this repository; no binaries or source from them are redistributed.
+
+## Recursive-clone verification (2026-10-16)
+
+A full `git submodule update --init --recursive` was run to completion in a
+scratch clone outside the tracked tree, and **every gitlink resolved to its
+exact pinned commit** — 25 submodules, 1012.4 s wall clock. This retires the
+open parts of B-003: `FEX/External/vixl` checked out cleanly at
+`5f418449c48f6ca3ad37c47ec632f17a561c0580` with no stale lock, and the
+previously unfetched binary test-corpus submodules do resolve.
+
+| Submodule | Pinned commit | Ref it resolved to |
+|---|---|---|
+| Madeira (root) | `279fd0f83170425db002fe25d6bd62f6355f497d` | `main` |
+| `wine` | `9129e9684daaeae70da9435e7c6060e59392634e` | `remotes/origin/madeira-lgpl` |
+| `FEX` | `f59cab95659e8add0c88f0c76ec1cf483c536dbf` | `heads/ios-port-2607` |
+| `dxmt` | `128b297c6e9a00014408dc68b4c2c2373b5813de` | `v0.73-185-g128b297` |
+| `madeira-dock` | `72558e416a390f3669457930f09a389e54f49556` | `heads/main` |
+
+All four are Madeira's own forks under `github.com/willfaust`, matching
+`.gitmodules` at `279fd0f`. The pins were confirmed reachable in those public
+forks through the GitHub API before cloning, which contradicts the note in
+Madeira's `docs/BUILDING.md:10-14` (written at commit `8a8cabe`, 2026-09-16)
+saying the submodule commits "exist only locally" and that a recursive clone
+fails at the first submodule. That statement was true when written and is now
+out of date; the forks were pushed on 2026-10-14.
+
+`FEX/External/rpmalloc` resolves to `willfaust/rpmalloc` at
+`812c2b9cf4310ffacf14e6b64066e78ab0c394b5`, confirming the fork relationship
+recorded in Madeira's licensing table (upstream 0BSD, Madeira's changes
+GPL-3.0-or-later with the converter exception).
+
+The scratch clone is `upstream/`, which is git-ignored and exists only for
+cross-checking; nothing in it is committed or redistributed.

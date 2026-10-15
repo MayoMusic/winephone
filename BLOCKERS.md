@@ -22,7 +22,7 @@
 - **Impact:** Full ancestry and unneeded test binaries are not fetched. `FEX/External/vixl` local worktree is empty although the exact gitlink is recorded; a stale `.git` lock prevented the current checkout from fetching it.
 - **Next path:** The bootstrap fetches VIXL at its exact gitlink on the clean runner. Confirm this succeeds in CI.
 - **Ladder tried:** (1) checked for an active Git process (none); (2) retained exact pinned gitlink and updated bootstrap to fetch selected nested sources; a stale lock removal was rejected by workspace safety policy. No corpus binary was run or added to the WinePhone tree.
-- **Status:** Local worktree issue; clean-run verification pending.
+- **Status: retired.** A full `git submodule update --init --recursive` completed in a scratch clone outside the tracked tree on 2026-10-16: all 25 submodules resolved to their exact pinned commits in 1012.4 s, including `FEX/External/vixl` at `5f418449c48f6ca3ad37c47ec632f17a561c0580` with no stale lock, and the previously unfetched binary test-corpus submodules did resolve. See `docs/SOURCES.md`, "Recursive-clone verification". The clean-run workflow therefore has no submodule blocker left; only the corpus binaries remain intentionally unbuilt, which they were always meant to be.
 
 ## B-004: Device-side behavior not verified
 
