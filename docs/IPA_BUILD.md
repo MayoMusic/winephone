@@ -75,6 +75,25 @@ path. The script has not yet run on macOS, so clean-build success is unproven.
   `tests/host/check-wineserver-base.py` runs the script end to end in a
   sandbox (stub `xcrun`/`ar`/`llvm-objcopy`) and pins the member set, the
   object swap, the rename sweep and both failure diagnostics.
+- **Stage-only dispatch.** `only_stage` can name `fex-ios`, `wine-ntdll-unix`
+  or `wineserver`. Each such run must have the pinned toolchain cache restored,
+  fetches only its own submodules, and runs its own prerequisites: `wineserver`
+  runs `build/wine-macos/configure.sh` first, because the stage's compiles
+  include `wine/build-macos/include` (its `config.h` and the widl-generated
+  public headers) — the iOS shims and the ntsync header it also includes are
+  tracked in this repository, and it links no other stage's output. A
+  stage-only run writes `IPA_PRESENT=0` and produces no IPA. The full path
+  (`all`, including the `push` event, where the dispatch input is unset) runs
+  bootstrap and everything after it; the workflow expresses that as one
+  predicate, `(inputs.only_stage || 'all')`, and
+  `tests/host/check-ipa-build-graph.py` pins it.
+- **Verified picking of the Xcode.** The selection step fails by name when
+  `Xcode_26.6.app` is absent (listing the installed Xcodes), and then checks
+  that `xcodebuild -version` reports Xcode 26.6, that the iPhoneOS SDK path
+  `xcrun` reports exists, and that the SDK's major version is at least the 17.0
+  every stage compiles against. The two versions a log shows — Xcode 26.6
+  (build 17F113) and SDK 26.5 — are one installation: the macOS 26 runner
+  image maps `iphoneos26.5` to both Xcode 26.5 and 26.6.
 - **Packaged artifact.** `tools/validate-ipa.sh` (called by
   `scripts/build-ipa.sh`, exercised by
   `tests/host/check-ipa-validation.py`) checks the archive's

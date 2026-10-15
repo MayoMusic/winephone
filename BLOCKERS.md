@@ -158,7 +158,8 @@
   so `win32u-unix`, `wine-pe-*`, DXMT, `xcodebuild` and the IPA can never run.
 - **Next path:** `build/wineserver/build.sh` now produces the base itself:
   `build_base_from_source()` compiles every `.c` in the pinned submodule's
-  `server/Makefile.in` `SOURCES` (43 files at wine `9129e968`) for iOS arm64
+  `server/Makefile.in` `SOURCES` (44 files at wine `9129e968`, counted from
+  the pinned file itself, which also lists `security.h` and three man pages) for iOS arm64
   with the stage's own `CC_FLAGS`, under their natural member names
   (`foo.c -> foo.o`) so the existing `PATCHED_FILES`/`REPLACEMENTS` swap and the
   `llvm-objcopy` symbol-rename sweep still apply object-by-object.
@@ -170,6 +171,46 @@
   file check. `tests/host/check-wineserver-base.py` runs the real script end to
   end in a sandbox (stub `xcrun`/`ar`/`llvm-objcopy`) and pins the member set,
   the object swap, the rename sweep and the failure diagnostics.
-- **Status:** repaired in the tree; the 43 real iOS compiles are **UNVERIFIED**
+- **Status:** repaired in the tree; the 44 real iOS compiles are **UNVERIFIED**
   until a full workflow run. By design that run reports every failing
-  `server/*.c` at once (counted summary) instead of one per dispatch.
+  `server/*.c` at once (counted summary) instead of one per dispatch. The stage
+  is also dispatchable on its own (`only_stage=wineserver`, which runs the
+  `wine-macos` configure it needs first) so it can be checked without the
+  fex-ios/fex-arm64ec legs.
+
+## B-014: FEX diagnostics recorded as warnings — adjudicated, not "fixed"
+
+- **Evidence:** the `only_stage=all` log the user supplied (also summarised in
+  `docs/HANDOFF.md`) records, from the pinned FEX fork
+  (`f59cab95659e8add0c88f0c76ec1cf483c536dbf`): ARM64EC inline-assembly
+  warnings naming X23/X24/X28 in `LongJump.cpp`, a possible out-of-bounds
+  `Info->FileName[1]` in `Source/Windows/Common/ImageTracker.cpp:261`, unused
+  functions in `AllocWatch.cpp`/`CPUFeatures.cpp`, an unused CMake option
+  `ENABLE_OFFLINE_RUNTIME`, failed feature probes (`getcpu`, `gettid`, `tgkill`,
+  `statx`, `renameat2`) and range-v3's "unknown system iOS". None of these stop
+  the FEX stages: `libFEXCore.a`/`libFEXCore_Base.a` and `libarm64ecfex.dll`
+  were produced in that run.
+- **What was checked here (2026-10-15, sources read at the pin):**
+  `ImageTracker.cpp` was fetched from the pin and its guard read directly: the
+  access is `Info->FileNameLength == 4 && Info->FileName[0] == '.' &&
+  Info->FileName[1] == '.'`, so `FileName[1]` is only evaluated when the
+  reported length is two WCHARs of a name `NtQueryDirectoryFile` wrote into the
+  buffer — the warning is the compiler's view of the `WCHAR FileName[1]`
+  flexible-array declaration, not a reachable out-of-bounds read. The file's
+  `LoadAOTImages` also differs substantially from current FEX upstream `main`
+  (upstream carries `CacheFile`/`EnableLoadedSection` code this pin does not
+  have), so the pin's shape is a fork/revision gap, not a WinePhone edit — this
+  is the fork's own code, and no WinePhone change was made to it.
+- **Impact:** none demonstrated: an unfalsifiable warning was resolved to false
+  positive by reading the guard, and the platform-probe failures are expected
+  for a Linux-hosted cross build (`FEX_IOS_HOST`/Darwin probes).
+- **Next path:** the ARM64EC X23/X24/X28 assembly warnings are the one item that
+  can name real ABI misuse (those registers are reserved in the ARM64EC ABI),
+  so they need the fork's `LongJump.cpp` read against Microsoft's ARM64EC
+  register rules and a compile under the ARM64EC target to be confirmed either
+  way. Neither is possible in this Linux worktree (no ARM64EC toolchain, no
+  Windows host), and an unverifiable assembly rewrite is exactly what the
+  project's rules exclude, so it stays open **UNVERIFIED** with the file, the
+  registers and the warning named above.
+- **Status:** investigated; no change made; one item (ARM64EC asm registers)
+  explicitly still open.

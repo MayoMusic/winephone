@@ -9,8 +9,8 @@ OUT="$(cd "$OUT" && pwd)"
 start=$SECONDS
 ONLY_STAGE="${WINEPHONE_ONLY_STAGE:-all}"
 case "$ONLY_STAGE" in
-  all|fex-ios|wine-ntdll-unix) ;;
-  *) echo "error: unsupported WINEPHONE_ONLY_STAGE '$ONLY_STAGE' (use all, fex-ios or wine-ntdll-unix)" >&2; exit 2 ;;
+  all|fex-ios|wine-ntdll-unix|wineserver) ;;
+  *) echo "error: unsupported WINEPHONE_ONLY_STAGE '$ONLY_STAGE' (use all, fex-ios, wine-ntdll-unix or wineserver)" >&2; exit 2 ;;
 esac
 BASE_COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 STAGES=""
@@ -55,8 +55,8 @@ if [[ "$ONLY_STAGE" == fex-ios ]]; then
     External/vixl External/fmt External/range-v3 External/rpmalloc \
     External/unordered_dense External/xxhash External/jemalloc_glibc \
     Source/Common/cpp-optparse
-elif [[ "$ONLY_STAGE" == wine-ntdll-unix ]]; then
-  echo "wine-ntdll-unix-only mode: skipping LLVM/toolchain bootstrap."
+elif [[ "$ONLY_STAGE" == wine-ntdll-unix || "$ONLY_STAGE" == wineserver ]]; then
+  echo "$ONLY_STAGE-only mode: skipping LLVM/toolchain bootstrap."
   git submodule update --init --depth 1 wine
 elif [[ "${WINEPHONE_SKIP_BOOTSTRAP:-0}" == 1 ]]; then
   echo "Bootstrap already completed in the workflow."
@@ -74,6 +74,25 @@ fi
   printf 'DXMT: '; git -C "$ROOT/dxmt" rev-parse HEAD 2>/dev/null || echo "(not initialized)"
   git submodule status --recursive || true
 } | tee -a "$OUT/build-environment.txt"
+
+if [[ "$ONLY_STAGE" == wineserver ]]; then
+  # build/wineserver/build.sh compiles the pinned submodule's server/ sources
+  # against wine/build-macos/include (the configured tree's config.h and the
+  # widl-generated public headers) and links no other stage's output: the iOS
+  # shims and the ntsync header it also includes (build/ntdll-unix/shims,
+  # build/madsync) are tracked in this repository, not produced by another
+  # stage. The configured wine tree is therefore the one prerequisite it has,
+  # and a stage-only dispatch runs it — the same stage the full path runs.
+  export PATH="$ROOT/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin:$PATH"
+  run_stage wine-macos bash "$ROOT/build/wine-macos/configure.sh"
+  run_stage wineserver bash "$ROOT/build/wineserver/build.sh"
+  echo "stage-only dispatch ($ONLY_STAGE): no IPA is built, validated or published by this run."
+  write_status "IPA_PRESENT=0" "NOTE=stage-only dispatch: no IPA is built or validated"
+  cat "$STATUS"
+  echo "Build duration: $((SECONDS-start)) seconds"
+  echo "Build duration seconds: $((SECONDS-start))" >> "$OUT/build-environment.txt"
+  exit 0
+fi
 
 if [[ "$ONLY_STAGE" == wine-ntdll-unix ]]; then
   export PATH="$ROOT/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin:$PATH"

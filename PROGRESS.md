@@ -136,10 +136,14 @@ the `WINEPHONE_BINARY_RELEASE_CLEARED` gate are unchanged.
   stage-only dispatch), and the workflow prints it, verifies the hash of the exact
   file it uploads, uploads the IPA **and** its hash, and says plainly that a
   stage-only dispatch produces no IPA.
-- **Xcode and SDK are two different numbers:** the workflow logs
-  `xcodebuild -version` (26.6) and `xcrun --sdk iphoneos --show-sdk-version`
-  (26.5) with their sources and fails with the list of installed Xcodes if
-  `Xcode_26.6.app` is absent.
+- **Xcode and SDK are two different numbers:** the workflow selects the pinned
+  `Xcode_26.6.app` (failing with the list of installed Xcodes when it is
+  absent) and then **verifies** what it selected — `xcodebuild -version` must
+  report Xcode 26.6, the `xcrun --sdk iphoneos --show-sdk-path` must exist, and
+  the SDK major version must be ≥ the 17.0 every stage compiles against. The
+  two numbers the logs show (`Xcode 26.6` / `Build version 17F113` and the SDK
+  `26.5`) are the same installation: the macOS 26 runner image's inventory maps
+  `iphoneos26.5` to both Xcode 26.5 and 26.6.
 - **CI coverage:** a `host-checks` job now runs the 106 `tests/host` checks that
   need no submodule and no Swift toolchain; until now nothing ran them, and ten
   of them assert their own presence in the workflow.
@@ -185,6 +189,61 @@ the `WINEPHONE_BINARY_RELEASE_CLEARED` gate are unchanged.
   toolchain-cache, ipa-validation and every workflow-reading check pass;
   `check-vcruntime-mfc.py`/`check-shader-pack.py` still fail exactly as at HEAD
   (inherited step expectations recorded in B-012, not run in CI).
-- UNVERIFIED: the 43 real iOS `server/*.c` compiles and everything after this
+- The source list is 44 `.c` files, not 43: the pinned
+  `server/Makefile.in` at wine `9129e968` lists 44 `.c` (plus `security.h` and
+  the three man pages, which are not compiled), and the stage's `awk` parser
+  was run against that file here — every one of the 44 exists at the pin
+  (`raw.githubusercontent.com/willfaust/wine/9129e968/...`, HTTP 200 for all),
+  as do all 13 `$WINE_SRC/server/*.c` sources named in `PATCHED_FILES`.
+- `only_stage=wineserver` is now dispatchable: the stage-only path fetches the
+  wine submodule and runs `build/wine-macos/configure.sh` (its one
+  prerequisite — the iOS shims and the ntsync header it also includes are
+  tracked in this repository, and it links no other stage's output) before
+  `build/wineserver/build.sh`, so the repaired stage can be verified without
+  the fex-ios/fex-arm64ec legs of the full path.
+- UNVERIFIED: the 44 real iOS `server/*.c` compiles and everything after this
   stage (win32u-unix, wine-pe, DXMT, xcodebuild, IPA) — one full workflow run
   away.
+
+### CI evidence read back from the GitHub API (2026-10-15)
+
+This worktree has network access to `raw.githubusercontent.com` and the
+unauthenticated REST API (run *logs* need admin rights — `403 Must have admin
+rights to Repository` — so the step-level conclusions below are the evidence,
+not log text). Three runs exist past the 6bde730/3daa133 repairs:
+
+| run | commit | dispatch | conclusion | step that failed | skipped, and why |
+| --- | --- | --- | --- | --- | --- |
+| 14 (38655974280) | `3daa1338` | stage-only | **success** | — | 7/8 bootstrap+save, 14/15 IPA upload+evidence, 16 gate |
+| 15 (38664461063) | `3daa1338` | `only_stage=all` | failure | 13 Build and package unsigned IPA | 11/12 FreeType build+save (cache hit), 14/15/16 |
+| 16 (38686578495) | `3daa1338` | `only_stage=all` | failure | 13 Build and package unsigned IPA | 11/12 FreeType build+save (cache hit), 14/15/16 |
+
+- The two `all` runs stop inside `Build and package unsigned IPA` — the
+  `=== wineserver ===` / `ERROR: No base libwineserver.a found` failure B-013
+  describes (the run the user quoted). FreeType is skipped because its own
+  cache key is an exact hit, which is the designed behaviour
+  (`build/freetype-ios/build.sh` verifies the restored tree itself).
+- Run 14 is green with **no IPA**: bootstrap, the IPA upload and the evidence
+  upload are all skipped. That is the documented stage-only shape, and it is
+  why the workflow's "Report build result" step reads
+  `artifacts/build-status.txt` (`IPA_PRESENT=0`) instead of treating a green
+  build step as an artifact — a step-level conclusion alone cannot tell the two
+  apart, which is the finding Critical Issue A asks for.
+- Runs 14/15/16 all predate `92fad32`, which carries the wineserver repair, the
+  workflow fixes and the `host-checks` job: none of them ran `tests/host`
+  (`total jobs 1` in each), so B-012 stands for every run on `main` so far.
+- **The Xcode 26.6 / 26.5 discrepancy is not a discrepancy.** The macOS 26
+  runner image's published inventory (`actions/runner-images`,
+  `images/macos/macos-26-Readme.md`) lists Xcode 26.6 (build **17F113**, the
+  default) *and* Xcode 26.5 (17F42), and its SDK table maps **iOS 26.5**
+  (`iphoneos26.5`) to *both* Xcode 26.5 and 26.6. So `Xcode 26.6` /
+  `Build version 17F113` from `xcodebuild -version` and `26.5` from
+  `xcrun --sdk iphoneos --show-sdk-version` are the same installation reporting
+  two different things: the Xcode version and the iPhoneOS SDK it ships. The
+  selection step now asserts the pair (Xcode exactly 26.6, SDK path present,
+  SDK major ≥ the `-miphoneos-version-min=17.0` the stages compile with)
+  instead of printing them, and fails by name when a future image moves.
+- The workflow's full-vs-stage-only conditions are now one predicate
+  (`(inputs.only_stage || 'all')`), so no step keys off a named stage and the
+  `push` event (unset input) cannot be mistaken for a stage-only run;
+  `tests/host/check-ipa-build-graph.py` pins that.

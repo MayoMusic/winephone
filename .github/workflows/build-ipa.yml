@@ -4,12 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       only_stage:
-        description: Run only a named build stage; fex-ios and wine-ntdll-unix need the restored toolchain cache
+        description: Run only a named build stage; every stage-only dispatch needs the restored toolchain cache
         required: true
         type: choice
         options:
           - all
           - fex-ios
+          - wineserver
           - wine-ntdll-unix
         default: all
   push:
@@ -31,12 +32,13 @@ jobs:
           submodules: false
           fetch-depth: 1
 
-      # Two different versions come out of this step and neither is stale: the
-      # Xcode installation (26.6) and the iPhoneOS SDK that ships inside it
-      # (26.5 on the current macos-26 image). They are labelled with the command
-      # that produced them, and a missing installation is reported with the
-      # Xcodes the image actually has, instead of `xcode-select` failing on a
-      # path.
+      # Two different versions come out of this Xcode and both are correct: the
+      # installation (26.6, build 17F113) and the iPhoneOS SDK that ships inside
+      # it (iphoneos26.5 — the macOS 26 runner image lists Xcode 26.6 under the
+      # iOS 26.5 SDK). They are checked here, not merely printed: a future image
+      # that ships a different Xcode fails by name in this step instead of
+      # somewhere inside the build, and the SDK the compile actually uses is the
+      # one that was verified.
       - name: Select Xcode 26.6
         shell: bash
         run: |
@@ -48,8 +50,25 @@ jobs:
             exit 1
           fi
           sudo xcode-select -s "$requested"
-          echo "Xcode version   (xcodebuild -version): $(xcodebuild -version | tr '\n' ' ')"
-          echo "iPhoneOS SDK    (xcrun --sdk iphoneos --show-sdk-version): $(xcrun --sdk iphoneos --show-sdk-version)"
+          xcode_version="$(xcodebuild -version | sed -n 1p)"
+          xcode_build="$(xcodebuild -version | sed -n 's/^Build version //p')"
+          sdk_version="$(xcrun --sdk iphoneos --show-sdk-version)"
+          sdk_path="$(xcrun --sdk iphoneos --show-sdk-path)"
+          echo "Xcode version   (xcodebuild -version): $xcode_version ($xcode_build)"
+          echo "iPhoneOS SDK    (xcrun --sdk iphoneos --show-sdk-version): $sdk_version at $sdk_path"
+          if [[ "$xcode_version" != "Xcode 26.6" ]]; then
+            echo "error: expected Xcode 26.6, selected '$xcode_version'; the pinned configure and every stage compile are made with it" >&2
+            exit 1
+          fi
+          if [[ ! -d "$sdk_path" ]]; then
+            echo "error: the iPhoneOS SDK path $sdk_path does not exist" >&2
+            exit 1
+          fi
+          sdk_major="${sdk_version%%.*}"
+          if [[ ! "$sdk_major" =~ ^[0-9]+$ ]] || (( sdk_major < 17 )); then
+            echo "error: the iPhoneOS SDK is $sdk_version; the stages compile with -miphoneos-version-min=17.0" >&2
+            exit 1
+          fi
 
       - name: Install pinned build tools
         run: |
@@ -57,10 +76,13 @@ jobs:
           echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
 
       # The cache holds build products, never sources: `Bootstrap pinned sources
-      # and toolchains` below always runs (a warm cache makes it cheap and it is
-      # what validates and repairs the restored trees), while the save is skipped
-      # when the exact key is already there -- actions/cache/save cannot reserve a
-      # key that exists.
+      # and toolchains` below runs on every full dispatch (`all`, including the
+      # push event, where only_stage is unset) — a warm cache makes it cheap and
+      # it is what validates and repairs the restored trees — while the save is
+      # skipped when the exact key is already there (actions/cache/save cannot
+      # reserve a key that exists). A stage-only dispatch skips both and instead
+      # requires the cache to have been restored: it fetches only the submodules
+      # its own stage needs.
       - name: Cache pinned toolchains
         id: toolchain-cache
         uses: actions/cache@a7833574556fa59680c1b7cb190c1735db73ebf0
@@ -85,7 +107,7 @@ jobs:
               echo "  MISSING: $d"
             fi
           done
-          if [[ "${{ inputs.only_stage }}" == "fex-ios" || "${{ inputs.only_stage }}" == "wine-ntdll-unix" ]]; then
+          if [[ "${{ inputs.only_stage || 'all' }}" != "all" ]]; then
             if [[ "${{ steps.toolchain-cache.outputs.cache-hit }}" != "true" ]]; then
               echo "error: a stage-only dispatch requires the restored pinned toolchain cache" >&2
               exit 1
@@ -97,11 +119,11 @@ jobs:
       # at the pin) and rebuilds only what is absent or at another revision, so a
       # cache hit is cheap and a damaged cache still ends complete.
       - name: Bootstrap pinned sources and toolchains
-        if: inputs.only_stage != 'fex-ios' && inputs.only_stage != 'wine-ntdll-unix'
+        if: (inputs.only_stage || 'all') == 'all'
         run: bash scripts/bootstrap.sh
 
       - name: Save toolchain cache after bootstrap
-        if: inputs.only_stage != 'fex-ios' && inputs.only_stage != 'wine-ntdll-unix' && steps.toolchain-cache.outputs.cache-hit != 'true'
+        if: (inputs.only_stage || 'all') == 'all' && steps.toolchain-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809
         with:
           path: |
@@ -186,7 +208,7 @@ jobs:
           shasum -a 256 -c artifacts/SHA256SUMS
 
       - name: Report stage-only run
-        if: inputs.only_stage == 'fex-ios' || inputs.only_stage == 'wine-ntdll-unix'
+        if: (inputs.only_stage || 'all') != 'all'
         run: |
           echo "stage-only dispatch (${{ inputs.only_stage }}): this run builds and reports one stage and produces no IPA."
           echo "It is a green build of that stage, not a validated package. Run with only_stage=all to build the IPA."

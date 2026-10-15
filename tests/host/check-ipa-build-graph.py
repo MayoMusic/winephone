@@ -34,6 +34,15 @@ between the stages the runner executes.
     Payload) and SHA256SUMS must be the hash of that same file, in a form
     `shasum -a 256 -c` can verify.
 
+  - a stage-only dispatch runs that stage's own prerequisites: `wineserver` is
+    dispatchable, and build-ipa.sh runs the configured wine tree
+    (wine/build-macos, which build/wineserver's compiles include) before it.
+
+  - the workflow must select-and-verify the Xcode it builds with: the Xcode
+    installation and the iPhoneOS SDK inside it are two different, both-correct
+    versions (26.6 / iphoneos26.5 on the macOS 26 runner image), and the step
+    fails by name when either is not the one the stages compile against.
+
   - the workflow must not re-save an existing toolchain cache key, must keep the
     release gate on both uploads, must verify the published hash against the
     published IPA, must not present a stage-only dispatch as an IPA build, and
@@ -162,6 +171,24 @@ check("git submodule update --init wine" in WS,
 check(re.search(r"refusing to build[\s\S]{0,120}?empty libwineserver", WS) is not None,
       "an unparseable source list fails rather than shipping an empty archive")
 
+# ------------------------------------------------------------- stage-only: wineserver
+# A stage-only dispatch must run the named stage's prerequisites, not just the
+# stage: build/wineserver's compiles include wine/build-macos/include (config.h
+# and the widl-generated public headers), which build/wine-macos/configure.sh
+# produces. The iOS shims and the ntsync header it also includes are tracked in
+# this repository, so the configured tree is its only prerequisite.
+check("all|fex-ios|wine-ntdll-unix|wineserver)" in IPA,
+      "build-ipa.sh accepts only_stage=wineserver")
+wn = IPA[IPA.index('if [[ "$ONLY_STAGE" == wineserver ]]'):]
+wn = wn[:wn.index("\nfi\n")]
+check(ordered(wn, 'run_stage wine-macos', 'run_stage wineserver'),
+      "a wineserver-only run configures wine/build-macos before the stage")
+submodules = IPA[IPA.index('elif [[ "$ONLY_STAGE" == wine-ntdll-unix'):IPA.index('elif [[ "${WINEPHONE_SKIP_BOOTSTRAP')]
+check("git submodule update --init --depth 1 wine" in submodules and "wineserver" in submodules,
+      "and fetches the wine submodule the stage compiles from")
+check('IPA_PRESENT=0' in wn and "exit 0" in wn,
+      "it records IPA_PRESENT=0 and stops there, like every other stage-only dispatch")
+
 # ------------------------------------------------------------- packaged artifact
 # The packaging step validates through tools/validate-ipa.sh, which is itself
 # exercised end to end by tests/host/check-ipa-validation.py.
@@ -207,6 +234,25 @@ check("runs-on: ubuntu-latest" in WF and "tests/host/check-" in WF,
       "a job runs the host checks (the checks assert their own presence in this file)")
 check("check-wineserver-base" in WF,
       "the workflow runs the functional wineserver base-archive check")
+check("          - wineserver\n" in WF,
+      "wineserver is dispatchable on its own so the repaired stage can be run without the full path")
+check(WF.count("(inputs.only_stage || 'all') == 'all'") == 2
+      and "(inputs.only_stage || 'all') != 'all'" in step("Report stage-only run")
+      # the cache-requirement step tests the same predicate inside a bash string
+      and "inputs.only_stage || 'all'" in step("Report toolchain cache restore")
+      and '!= "all"' in step("Report toolchain cache restore"),
+      "full-vs-stage-only control flow is one predicate, so the push event (unset input) is a full run")
+check("inputs.only_stage ==" not in WF,
+      "no step keys off a named stage: adding one cannot silently skip bootstrap")
+
+# ------------------------------------------------------------- the Xcode the stages use
+xcode = step("Select Xcode 26.6")
+check('!= "Xcode 26.6"' in xcode and "error: expected Xcode 26.6" in xcode,
+      "the selected Xcode is verified to be the pinned one, by name")
+check("--show-sdk-version" in xcode and "--show-sdk-path" in xcode and "sdk_major" in xcode,
+      "and the iPhoneOS SDK examined is the one it will compile with (version and path)")
+check("xcodebuild -version" in xcode and "Build version" in xcode,
+      "both numbers are labelled with the command that produced them")
 
 if failures:
     print("FAILED: %d" % len(failures))
