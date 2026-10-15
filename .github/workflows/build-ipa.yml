@@ -31,19 +31,36 @@ jobs:
           submodules: false
           fetch-depth: 1
 
+      # Two different versions come out of this step and neither is stale: the
+      # Xcode installation (26.6) and the iPhoneOS SDK that ships inside it
+      # (26.5 on the current macos-26 image). They are labelled with the command
+      # that produced them, and a missing installation is reported with the
+      # Xcodes the image actually has, instead of `xcode-select` failing on a
+      # path.
       - name: Select Xcode 26.6
         shell: bash
         run: |
           set -euo pipefail
-          sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
-          xcodebuild -version
-          xcrun --sdk iphoneos --show-sdk-version
+          requested=/Applications/Xcode_26.6.app/Contents/Developer
+          if [[ ! -d "$requested" ]]; then
+            echo "error: $requested is not installed; this image has:" >&2
+            ls -d /Applications/Xcode*.app >&2 2>/dev/null || true
+            exit 1
+          fi
+          sudo xcode-select -s "$requested"
+          echo "Xcode version   (xcodebuild -version): $(xcodebuild -version | tr '\n' ' ')"
+          echo "iPhoneOS SDK    (xcrun --sdk iphoneos --show-sdk-version): $(xcrun --sdk iphoneos --show-sdk-version)"
 
       - name: Install pinned build tools
         run: |
           brew install cmake ninja meson bison
           echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
 
+      # The cache holds build products, never sources: `Bootstrap pinned sources
+      # and toolchains` below always runs (a warm cache makes it cheap and it is
+      # what validates and repairs the restored trees), while the save is skipped
+      # when the exact key is already there -- actions/cache/save cannot reserve a
+      # key that exists.
       - name: Cache pinned toolchains
         id: toolchain-cache
         uses: actions/cache@a7833574556fa59680c1b7cb190c1735db73ebf0
@@ -58,7 +75,16 @@ jobs:
       - name: Report toolchain cache restore
         shell: bash
         run: |
+          set -euo pipefail
           echo "Pinned toolchain cache exact-key hit: ${{ steps.toolchain-cache.outputs.cache-hit }}"
+          for d in toolchains/llvm-project toolchains/llvm-host-build toolchains/llvm-ios-build \
+                   toolchains/llvm-mingw-20260421-ucrt-macos-universal; do
+            if [ -d "$d" ]; then
+              echo "  present: $d ($(find "$d" -type f | wc -l | tr -d ' ') files)"
+            else
+              echo "  MISSING: $d"
+            fi
+          done
           if [[ "${{ inputs.only_stage }}" == "fex-ios" || "${{ inputs.only_stage }}" == "wine-ntdll-unix" ]]; then
             if [[ "${{ steps.toolchain-cache.outputs.cache-hit }}" != "true" ]]; then
               echo "error: a stage-only dispatch requires the restored pinned toolchain cache" >&2
@@ -66,12 +92,16 @@ jobs:
             fi
           fi
 
+      # scripts/bootstrap.sh validates every restored tree against the artifact
+      # its consumers use (llvm-tblgen, llvm-config.h + lib/*.a, the git checkout
+      # at the pin) and rebuilds only what is absent or at another revision, so a
+      # cache hit is cheap and a damaged cache still ends complete.
       - name: Bootstrap pinned sources and toolchains
         if: inputs.only_stage != 'fex-ios' && inputs.only_stage != 'wine-ntdll-unix'
         run: bash scripts/bootstrap.sh
 
       - name: Save toolchain cache after bootstrap
-        if: inputs.only_stage != 'fex-ios' && inputs.only_stage != 'wine-ntdll-unix'
+        if: inputs.only_stage != 'fex-ios' && inputs.only_stage != 'wine-ntdll-unix' && steps.toolchain-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809
         with:
           path: |
@@ -97,7 +127,14 @@ jobs:
       - name: Report FreeType cache restore
         shell: bash
         run: |
+          set -euo pipefail
           echo "Pinned FreeType cache exact-key hit: ${{ steps.freetype-cache.outputs.cache-hit }}"
+          for f in research/freetype/include/ft2build.h \
+                   build/freetype-ios/build/include/freetype/config/ftconfig.h \
+                   build/freetype-ios/build/include/freetype/config/ftoption.h \
+                   build/freetype-ios/build/libfreetype.a; do
+            if [ -e "$f" ]; then echo "  present: $f"; else echo "  MISSING: $f"; fi
+          done
 
       - name: Build FreeType for iOS
         if: steps.freetype-cache.outputs.cache-hit != 'true'
@@ -113,6 +150,7 @@ jobs:
           key: winephone-freetype-2.13.3-42608f77f20749dd6ddc9e0536788eaad70ea4b5-v1
 
       - name: Build and package unsigned IPA
+        id: ipa
         run: bash scripts/build-ipa.sh artifacts
         env:
           WINEPHONE_SKIP_BOOTSTRAP: '1'
@@ -121,12 +159,46 @@ jobs:
           # stage-only dispatch is required to have the pinned toolchain cache.
           WINEPHONE_TOOLCHAIN_CACHE_HIT: ${{ steps.toolchain-cache.outputs.cache-hit }}
 
+      # What the step above actually produced. scripts/build-ipa.sh writes
+      # artifacts/build-status.txt (IPA_PRESENT=1 with the path, arch and hash on
+      # the full path; IPA_PRESENT=0 for a stage-only dispatch). A green build
+      # step must not be read as an IPA.
+      - name: Report build result
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f artifacts/build-status.txt ]; then
+            cat artifacts/build-status.txt
+          else
+            echo "error: scripts/build-ipa.sh wrote no artifacts/build-status.txt" >&2
+            exit 1
+          fi
+
+      - name: Verify unsigned IPA and hash
+        if: vars.WINEPHONE_BINARY_RELEASE_CLEARED == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f artifacts/WinePhone-unsigned.ipa
+          test -f artifacts/SHA256SUMS
+          # The hash that is uploaded next to the IPA must be the hash of that
+          # IPA, verified here on the exact file the upload step reads.
+          shasum -a 256 -c artifacts/SHA256SUMS
+
+      - name: Report stage-only run
+        if: inputs.only_stage == 'fex-ios' || inputs.only_stage == 'wine-ntdll-unix'
+        run: |
+          echo "stage-only dispatch (${{ inputs.only_stage }}): this run builds and reports one stage and produces no IPA."
+          echo "It is a green build of that stage, not a validated package. Run with only_stage=all to build the IPA."
+
       - name: Upload unsigned IPA and hash
         if: vars.WINEPHONE_BINARY_RELEASE_CLEARED == 'true'
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
         with:
           name: WinePhone-unsigned-IPA
-          path: artifacts/WinePhone-unsigned.ipa
+          path: |
+            artifacts/WinePhone-unsigned.ipa
+            artifacts/SHA256SUMS
           if-no-files-found: error
           retention-days: 14
 
@@ -138,6 +210,7 @@ jobs:
           path: |
             artifacts/SHA256SUMS
             artifacts/build-environment.txt
+            artifacts/build-status.txt
             artifacts/Payload/Madeira.app/Info.plist
           if-no-files-found: error
           retention-days: 14
@@ -146,3 +219,239 @@ jobs:
         if: vars.WINEPHONE_BINARY_RELEASE_CLEARED != 'true'
         run: echo "IPA validation completed, but artifact publication is gated pending license/relink review. See LICENSES/PROVENANCE.md."
 
+  # The repository's regression suite (~150 checks under tests/host). Several of
+  # them assert their own presence in this workflow, and until this job existed
+  # nothing ran them: the build job only builds. A check that needs the wine,
+  # DXMT or FEX submodules or a Swift toolchain cannot run here (this job checks
+  # out no submodules and the runner has no swiftc), so it is not listed; those
+  # are run locally/by hand until they are wired into a macOS job.
+  host-checks:
+    name: Host regression checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout pinned source tree
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3
+        with:
+          submodules: false
+          fetch-depth: 1
+
+      - name: Install host check tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends build-essential zip unzip
+
+      - name: Check addr-scan
+        run: python3 tests/host/check-addr-scan.py
+      - name: Check audio-downmix
+        run: python3 tests/host/check-audio-downmix.py
+      - name: Check audio-wow64
+        run: python3 tests/host/check-audio-wow64.py
+      - name: Check aux-iat-heal
+        run: python3 tests/host/check-aux-iat-heal.py
+      - name: Check band-census
+        run: python3 tests/host/check-band-census.py
+      - name: Check bg-qos
+        run: python3 tests/host/check-bg-qos.py
+      - name: Check cfg-early-docs
+        run: python3 tests/host/check-cfg-early-docs.py
+      - name: Check cfg-game
+        run: python3 tests/host/check-cfg-game.py
+      - name: Check child-desktop
+        run: python3 tests/host/check-child-desktop.py
+      - name: Check child-ntdll-alias
+        run: python3 tests/host/check-child-ntdll-alias.py
+      - name: Check chromium-oom-exit
+        run: python3 tests/host/check-chromium-oom-exit.py
+      - name: Check clear-rects
+        run: python3 tests/host/check-clear-rects.py
+      - name: Check clip-dedupe
+        run: python3 tests/host/check-clip-dedupe.py
+      - name: Check console-headless
+        run: python3 tests/host/check-console-headless.py
+      - name: Check d3d12-tiled
+        run: python3 tests/host/check-d3d12-tiled.py
+      - name: Check dock-gdi-section
+        run: python3 tests/host/check-dock-gdi-section.py
+      - name: Check dock-installers
+        run: python3 tests/host/check-dock-installers.py
+      - name: Check dock-reset
+        run: python3 tests/host/check-dock-reset.py
+      - name: Check draw-dedup
+        run: python3 tests/host/check-draw-dedup.py
+      - name: Check ec-conhost
+        run: python3 tests/host/check-ec-conhost.py
+      - name: Check ec-hook
+        run: python3 tests/host/check-ec-hook.py
+      - name: Check eco-native
+        run: python3 tests/host/check-eco-native.py
+      - name: Check encode-batch
+        run: python3 tests/host/check-encode-batch.py
+      - name: Check execreq-leave
+        run: python3 tests/host/check-execreq-leave.py
+      - name: Check fex-arena-census
+        run: python3 tests/host/check-fex-arena-census.py
+      - name: Check fixed-base-guard
+        run: python3 tests/host/check-fixed-base-guard.py
+      - name: Check free-delay
+        run: python3 tests/host/check-free-delay.py
+      - name: Check fullscreen-window
+        run: python3 tests/host/check-fullscreen-window.py
+      - name: Check game-recommendations
+        run: python3 tests/host/check-game-recommendations.py
+      - name: Check gamepad
+        run: python3 tests/host/check-gamepad.py
+      - name: Check got-diagnostics
+        run: python3 tests/host/check-got-diagnostics.py
+      - name: Check guest-instruction
+        run: python3 tests/host/check-guest-instruction.py
+      - name: Check hw-registry
+        run: python3 tests/host/check-hw-registry.py
+      - name: Check iat-sync-owner
+        run: python3 tests/host/check-iat-sync-owner.py
+      - name: Check image-patch-trace
+        run: python3 tests/host/check-image-patch-trace.py
+      - name: Check image-reload
+        run: python3 tests/host/check-image-reload.py
+      - name: Check image-retire
+        run: python3 tests/host/check-image-retire.py
+      - name: Check input-foreground
+        run: python3 tests/host/check-input-foreground.py
+      - name: Check ipa-build-graph
+        run: python3 tests/host/check-ipa-build-graph.py
+      - name: Check ipa-validation
+        run: python3 tests/host/check-ipa-validation.py
+      - name: Check jit-env
+        run: python3 tests/host/check-jit-env.py
+      - name: Check jit-method
+        run: python3 tests/host/check-jit-method.py
+      - name: Check jit-pairing
+        run: python3 tests/host/check-jit-pairing.py
+      - name: Check kmt-adapter
+        run: python3 tests/host/check-kmt-adapter.py
+      - name: Check launch-routing
+        run: python3 tests/host/check-launch-routing.py
+      - name: Check lazy-windows
+        run: python3 tests/host/check-lazy-windows.py
+      - name: Check lean-diag
+        run: python3 tests/host/check-lean-diag.py
+      - name: Check library-sections
+        run: python3 tests/host/check-library-sections.py
+      - name: Check metal-gap
+        run: python3 tests/host/check-metal-gap.py
+      - name: Check monitor-cadence
+        run: python3 tests/host/check-monitor-cadence.py
+      - name: Check msc-unbounded-retry
+        run: python3 tests/host/check-msc-unbounded-retry.py
+      - name: Check native-unaligned
+        run: python3 tests/host/check-native-unaligned.py
+      - name: Check nixxes-optins
+        run: python3 tests/host/check-nixxes-optins.py
+      - name: Check nsi-network
+        run: python3 tests/host/check-nsi-network.py
+      - name: Check pad-output
+        run: python3 tests/host/check-pad-output.py
+      - name: Check place-proof
+        run: python3 tests/host/check-place-proof.py
+      - name: Check pool-code-exit
+        run: python3 tests/host/check-pool-code-exit.py
+      - name: Check pool-failure-census
+        run: python3 tests/host/check-pool-failure-census.py
+      - name: Check pool-low-images
+        run: python3 tests/host/check-pool-low-images.py
+      - name: Check pool-low
+        run: python3 tests/host/check-pool-low.py
+      - name: Check pool-placement
+        run: python3 tests/host/check-pool-placement.py
+      - name: Check pool-split
+        run: python3 tests/host/check-pool-split.py
+      - name: Check pool-startup-budget
+        run: python3 tests/host/check-pool-startup-budget.py
+      - name: Check power-gov
+        run: python3 tests/host/check-power-gov.py
+      - name: Check power-probe
+        run: python3 tests/host/check-power-probe.py
+      - name: Check preload-dlls
+        run: python3 tests/host/check-preload-dlls.py
+      - name: Check pso-lazy-libs
+        run: python3 tests/host/check-pso-lazy-libs.py
+      - name: Check quiet-log
+        run: python3 tests/host/check-quiet-log.py
+      - name: Check rdr2-va-hold
+        run: python3 tests/host/check-rdr2-va-hold.py
+      - name: Check readonly-link
+        run: python3 tests/host/check-readonly-link.py
+      - name: Check replay-split
+        run: python3 tests/host/check-replay-split.py
+      - name: Check ring-share
+        run: python3 tests/host/check-ring-share.py
+      - name: Check rsig-miss
+        run: python3 tests/host/check-rsig-miss.py
+      - name: Check rtcs-cap
+        run: python3 tests/host/check-rtcs-cap.py
+      - name: Check sc-cef-gate
+        run: python3 tests/host/check-sc-cef-gate.py
+      - name: Check sc-grant-growth
+        run: python3 tests/host/check-sc-grant-growth.py
+      - name: Check sc-ipc-rebind
+        run: python3 tests/host/check-sc-ipc-rebind.py
+      - name: Check sc-layout
+        run: python3 tests/host/check-sc-layout.py
+      - name: Check sc-render-handler
+        run: python3 tests/host/check-sc-render-handler.py
+      - name: Check sc-runstate
+        run: python3 tests/host/check-sc-runstate.py
+      - name: Check sc-ui-close
+        run: python3 tests/host/check-sc-ui-close.py
+      - name: Check section-abort
+        run: python3 tests/host/check-section-abort.py
+      - name: Check skin-check
+        run: python3 tests/host/check-skin-check.py
+      - name: Check small-va-band
+        run: python3 tests/host/check-small-va-band.py
+      - name: Check srv-direct
+        run: python3 tests/host/check-srv-direct.py
+      - name: Check srv-eco-follow
+        run: python3 tests/host/check-srv-eco-follow.py
+      - name: Check srv-fd-reply
+        run: python3 tests/host/check-srv-fd-reply.py
+      - name: Check stack-spill
+        run: python3 tests/host/check-stack-spill.py
+      - name: Check stale-heal-owner
+        run: python3 tests/host/check-stale-heal-owner.py
+      - name: Check static-cbv
+        run: python3 tests/host/check-static-cbv.py
+      - name: Check suspend-windows
+        run: python3 tests/host/check-suspend-windows.py
+      - name: Check swap-coverage
+        run: python3 tests/host/check-swap-coverage.py
+      - name: Check swap-diag
+        run: python3 tests/host/check-swap-diag.py
+      - name: Check swap-images
+        run: python3 tests/host/check-swap-images.py
+      - name: Check teb-trampoline-capacity
+        run: python3 tests/host/check-teb-trampoline-capacity.py
+      - name: Check thread-create-failure
+        run: python3 tests/host/check-thread-create-failure.py
+      - name: Check toolchain-cache
+        run: python3 tests/host/check-toolchain-cache.py
+      - name: Check unixlib-binder
+        run: python3 tests/host/check-unixlib-binder.py
+      - name: Check vis-trace
+        run: python3 tests/host/check-vis-trace.py
+      - name: Check win32u-zero-bits
+        run: python3 tests/host/check-win32u-zero-bits.py
+      - name: Check wine-media-dlls
+        run: python3 tests/host/check-wine-media-dlls.py
+      - name: Check wineserver-base
+        run: python3 tests/host/check-wineserver-base.py
+      - name: Check wow-context
+        run: python3 tests/host/check-wow-context.py
+      - name: Check wow-guard
+        run: python3 tests/host/check-wow-guard.py
+      - name: Check x18-arith
+        run: python3 tests/host/check-x18-arith.py
+      - name: Check x18-derived-base
+        run: python3 tests/host/check-x18-derived-base.py
+      - name: Check x64-image-nocopy
+        run: python3 tests/host/check-x64-image-nocopy.py

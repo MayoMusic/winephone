@@ -164,3 +164,44 @@ Run 38651245572 never reached this, because `wine/dlls/dwrite/freetype.c` fails 
 `build/wine-macos/configure.sh` therefore now also generates them, after configure, in `wine/build-macos/include` — the tree every unix side already includes (`-I"$WINE_BUILD/include"`): `make -C wine/build-macos/tools/widl` (only if the binary is absent) then `make -C wine/build-macos/include`, and a `present`/`MISSING` report for all four headers. It is deliberately best-effort (a failure is printed and the stage continues) only because that keeps the diagnosis in one place: if the headers are still absent, the diagnostic above says so and the affected compile still fails loudly with its command line.
 
 **UNVERIFIED:** whether those two make invocations succeed on the runner (the widl rules, the tool build, and the need for bison/flex in the `include` rule set are read from makedep and configure, not executed — this worktree has no macOS, no bison/flex and no root, so a Wine build tree cannot be generated here); whether `make -C include` needs further generated headers first; and whether FreeType's `ft2build.h` from `research/freetype/include` is enough for `wine/dlls/dwrite/freetype.c` without the CMake build's generated headers.
+
+## Correction: FreeType's two include roots, and the arm64ec include path
+
+The section above ends with three open questions. Two of them are now answered
+from the sources rather than from a run, and the third is a wrong assumption in
+the tree:
+
+1. **"whether FreeType's `ft2build.h` from `research/freetype/include` is enough
+   for `wine/dlls/dwrite/freetype.c` without the CMake build's generated
+   headers" — no, and the file that matters is not `ft2build.h`.** FreeType's
+   `CMakeLists.txt` at the pinned `42608f77f20749dd6ddc9e0536788eaad70ea4b5`
+   writes its generated configuration headers to
+   `${PROJECT_BINARY_DIR}/include/freetype/config/` (`FTCONFIG_H_NAME`,
+   `FTOPTION_H_NAME`) and takes `include/ft2build.h` from the *source* tree
+   (`file(GLOB PUBLIC_HEADERS "include/ft2build.h" ...)`); no configuration
+   writes `ft2build.h` into the build tree, so
+   `build/freetype-ios/build/include/ft2build.h` — one of the two paths the
+   diagnostic reported as MISSING — cannot exist. A consumer needs both roots,
+   the build one first, which is what `build/win32u-unix/build.sh` has always
+   done and what `dwrite_unixlib` now does. The difference between the two
+   `ftconfig.h` files is small but real: `builds/unix/ftconfig.h.in` carries
+   `#undef HAVE_UNISTD_H` / `#undef HAVE_FCNTL_H`, which CMake rewrites to
+   `#define ... 1` when the headers are present, where the ANSI copy in
+   `include/freetype/config/ftconfig.h` has neither line.
+
+2. **`build/ntdll-unix/build.sh`'s `-I"$REPO_ROOT/wine/build-arm64ec/include"`
+   was wrong, not merely empty.** The note above explains why the arm64ec tree
+   was already built on Madeira's machine; in WinePhone's pipeline it is built
+   by `wine-pe-ntdll`, *after* `wine-ntdll-unix`, so the flag pointed at a tree
+   that cannot exist when the compile runs. The widl-generated
+   `dwrite_3.h`/`d2d1.h`/`mfobjects.h` come from `wine/build-macos/include`,
+   which `compile_unixlib` already puts on the command line.
+
+3. **The widl generation in `build/wine-macos/configure.sh` is still unexecuted.**
+   `make -C tools/widl` + `make -C include` are read out of `configure`'s
+   generated rules and `wine/tools/makedep.c`; this worktree has no macOS, no
+   bison/flex and no Wine checkout, so nothing here can run them. What changed is
+   that a failure is no longer inferred from a compile error:
+   `build/ntdll-unix/build.sh` checks `dwrite_3.h`, `d2d1.h` and `mfobjects.h`
+   in `wine/build-macos/include` among its `REQUIRED_HEADERS` and stops with a
+   message naming the `wine-macos` stage if they are absent.

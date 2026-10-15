@@ -1,8 +1,12 @@
 #!/bin/bash
 # Build freetype static for iOS arm64 — consumed by build/win32u-unix/build.sh
 # and build/ntdll-unix/build.sh (whose dwrite override includes Wine's
-# dlls/dwrite/freetype.c). Those compile against these headers and merge
-# build/libfreetype.a into libwin32u_unix.a (no Xcode project changes).
+# dlls/dwrite/freetype.c). Those compile against research/freetype/include
+# (ft2build.h and the rest of the public tree) plus this script's generated
+# build/include (freetype/config/{ftconfig.h,ftoption.h}, named first on their
+# command lines), and merge build/libfreetype.a into libwin32u_unix.a (no Xcode
+# project changes). The two roots' contents are verified at the end of this
+# script.
 #
 # Source: freetype, shallow-cloned at tag VER-2-13-3 into research/freetype.
 # That is Madeira's recipe (the original header here said
@@ -40,7 +44,10 @@ if [ "$GOT" != "$FREETYPE_COMMIT" ]; then
 fi
 echo "freetype source verified at $GOT"
 
-cmake -S "$SRC" -B "$BUILD_DIR/build" -G "Unix Makefiles" \
+BUILD="$BUILD_DIR/build"
+FREETYPE_LIB="$BUILD/libfreetype.a"
+
+cmake -S "$SRC" -B "$BUILD" -G "Unix Makefiles" \
   -DCMAKE_SYSTEM_NAME=iOS \
   -DCMAKE_OSX_ARCHITECTURES=arm64 \
   -DCMAKE_OSX_DEPLOYMENT_TARGET=17.0 \
@@ -51,5 +58,40 @@ cmake -S "$SRC" -B "$BUILD_DIR/build" -G "Unix Makefiles" \
   -DFT_DISABLE_HARFBUZZ=ON -DFT_DISABLE_BROTLI=ON \
   -DCMAKE_C_FLAGS="-fno-stack-protector"
 
-cmake --build "$BUILD_DIR/build" -j8
-echo "Done: $BUILD_DIR/build/libfreetype.a"
+cmake --build "$BUILD" -j8
+
+# ---------------------------------------------------------------- artifacts
+# FreeType's CMake build installs nothing, and it does NOT create
+# <build>/include/ft2build.h: ft2build.h is a tracked source header. What it
+# does create are the generated configuration headers under
+# <build>/include/freetype/config/ (freetype/CMakeLists.txt points
+# FTCONFIG_H_NAME/FTOPTION_H_NAME at ${PROJECT_BINARY_DIR}/include), and those
+# are load-bearing: the consumers put <build>/include before
+# research/freetype/include (build/ntdll-unix's dwrite_unixlib,
+# build/win32u-unix's freetype_ios) so the ftconfig.h generated from
+# builds/unix/ftconfig.h.in wins over the ANSI copy in the source tree. Verify
+# both halves here, so a partial or stale cached tree is rejected by name now
+# instead of as a compile failure in a later stage.
+FREETYPE_CONFIG_H="$BUILD/include/freetype/config/ftconfig.h"
+FREETYPE_OPTION_H="$BUILD/include/freetype/config/ftoption.h"
+FREETYPE_FT2BUILD_H="$SRC/include/ft2build.h"
+MISSING_REQUIRED=""
+for f in "$FREETYPE_LIB" "$FREETYPE_CONFIG_H" "$FREETYPE_OPTION_H" "$FREETYPE_FT2BUILD_H"; do
+    [ -e "$f" ] || MISSING_REQUIRED="$MISSING_REQUIRED $f"
+done
+if [ -n "$MISSING_REQUIRED" ]; then
+    echo "error: the FreeType build did not produce:$MISSING_REQUIRED" >&2
+    exit 1
+fi
+ARCHS="$(lipo -archs "$FREETYPE_LIB" 2>/dev/null || echo unknown)"
+case "$ARCHS" in
+    *arm64*) ;;
+    *) echo "error: $FREETYPE_LIB has no arm64 slice (lipo -archs says '$ARCHS')" >&2; exit 1 ;;
+esac
+echo "=== freetype iOS artifacts ==="
+echo "  source commit     = $GOT"
+echo "  static library    = $FREETYPE_LIB ($(wc -c < "$FREETYPE_LIB" | tr -d ' ') bytes, lipo: $ARCHS)"
+echo "  generated headers = $FREETYPE_CONFIG_H"
+echo "                      $FREETYPE_OPTION_H (consumed with -I$BUILD/include)"
+echo "  source header     = $FREETYPE_FT2BUILD_H (consumed with -I$SRC/include)"
+echo "Done: $FREETYPE_LIB"

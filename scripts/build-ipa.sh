@@ -12,10 +12,27 @@ case "$ONLY_STAGE" in
   all|fex-ios|wine-ntdll-unix) ;;
   *) echo "error: unsupported WINEPHONE_ONLY_STAGE '$ONLY_STAGE' (use all, fex-ios or wine-ntdll-unix)" >&2; exit 2 ;;
 esac
+BASE_COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+STAGES=""
+STATUS="$OUT/build-status.txt"
+
+# What this run actually produced, for the workflow (and for anyone reading the
+# log): a stage-only dispatch builds one stage and produces no IPA, while the
+# full path must end with IPA_PRESENT=1 and a hash that verifies against it. A
+# green step must not imply an artifact that was never made.
+write_status() {
+  {
+    printf 'STAGE=%s\n' "$ONLY_STAGE"
+    printf 'COMMIT=%s\n' "$BASE_COMMIT"
+    printf 'STAGES=%s\n' "${STAGES# }"
+    printf '%s\n' "$@"
+  } > "$STATUS"
+}
 
 run_stage() {
   local label="$1" stage_start="$SECONDS"
   shift
+  STAGES="$STAGES $label"
   printf '\n=== %s ===\n' "$label"
   "$@" 2>&1 | tee -a "$OUT/build.log"
   printf '%s duration seconds: %s\n' "$label" "$((SECONDS-stage_start))" \
@@ -69,6 +86,9 @@ if [[ "$ONLY_STAGE" == wine-ntdll-unix ]]; then
   run_stage ffmpeg bash "$ROOT/build/ffmpeg/build.sh"
   run_stage wine-macos bash "$ROOT/build/wine-macos/configure.sh"
   run_stage wine-ntdll-unix bash "$ROOT/build/ntdll-unix/build.sh"
+  echo "stage-only dispatch ($ONLY_STAGE): no IPA is built, validated or published by this run."
+  write_status "IPA_PRESENT=0" "NOTE=stage-only dispatch: no IPA is built or validated"
+  cat "$STATUS"
   echo "Build duration: $((SECONDS-start)) seconds"
   echo "Build duration seconds: $((SECONDS-start))" >> "$OUT/build-environment.txt"
   exit 0
@@ -82,6 +102,9 @@ if [[ "$ONLY_STAGE" == all ]]; then
 fi
 run_stage fex-ios bash "$ROOT/build/fex-ios/build.sh"
 if [[ "$ONLY_STAGE" == fex-ios ]]; then
+  echo "stage-only dispatch ($ONLY_STAGE): no IPA is built, validated or published by this run."
+  write_status "IPA_PRESENT=0" "NOTE=stage-only dispatch: no IPA is built or validated"
+  cat "$STATUS"
   echo "Build duration: $((SECONDS-start)) seconds"
   echo "Build duration seconds: $((SECONDS-start))" >> "$OUT/build-environment.txt"
   exit 0
@@ -134,12 +157,26 @@ ditto "$APP" "$OUT/Payload/Madeira.app"
 IPA="$OUT/WinePhone-unsigned.ipa"
 run_stage ipa-package bash -c 'cd "$1" && /usr/bin/zip -qry "$2" Payload' _ "$OUT" "$IPA"
 
-unzip -l "$IPA" | grep -q 'Payload/Madeira.app/Info.plist' || exit 4
-unzip -l "$IPA" | grep -q 'Payload/Madeira.app/Madeira$' || exit 4
-if unzip -l "$IPA" | grep -Eiq 'libmetalirconverter|d3d12core\.dll|madeira_d3d12|x86_64-vcruntime'; then
-  echo "error: forbidden D3D12 converter or Microsoft runtime found in IPA" >&2; exit 5
-fi
-shasum -a 256 "$IPA" | tee "$OUT/SHA256SUMS"
+# ---------------------------------------------------------------- validate
+# Check the artifact, not the step that produced it: the archive's layout, that
+# the bundle's CFBundleExecutable really names the executable inside it, that
+# the executable carries the arm64 slice the device needs, that Payload holds
+# one app, that no forbidden release input is inside, and that the hash written
+# next to the IPA is provably the hash of that IPA. tools/validate-ipa.sh does
+# those checks and writes+verifies SHA256SUMS; it is runnable (and is run by
+# tests/host/check-ipa-validation.py) without a Mac except for lipo.
+IPA_KEYS="$(bash "$ROOT/tools/validate-ipa.sh" "$IPA" "$OUT/Payload" "$OUT/SHA256SUMS" "$ROOT")" \
+  || { echo "error: IPA validation failed for $IPA" >&2; exit 4; }
+echo "$IPA_KEYS"
+APP_COUNT="$(sed -n 's/^APP_BUNDLES=//p' <<<"$IPA_KEYS")"
+BUNDLE_EXEC="$(sed -n 's/^BUNDLE_EXEC=//p' <<<"$IPA_KEYS")"
+APP_ARCHS="$(sed -n 's/^IPA_ARCHS=//p' <<<"$IPA_KEYS")"
+IPA_HASH="$(sed -n 's/^IPA_SHA256=//p' <<<"$IPA_KEYS")"
+echo "IPA validated: $APP_COUNT app bundle, $BUNDLE_EXEC ($APP_ARCHS), sha256 $IPA_HASH"
+
+write_status "IPA_PRESENT=1" "IPA_PATH=$IPA" "IPA_SHA256=$IPA_HASH" \
+  "IPA_ARCHS=$APP_ARCHS" "IPA_BUNDLE_EXEC=$BUNDLE_EXEC" "SHA256SUMS=$OUT/SHA256SUMS"
+cat "$STATUS"
 echo "Build duration: $((SECONDS-start)) seconds"
 echo "Build duration seconds: $((SECONDS-start))" >> "$OUT/build-environment.txt"
 echo "IPA: $IPA"

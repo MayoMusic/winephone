@@ -21,11 +21,18 @@ path. The script has not yet run on macOS, so clean-build success is unproven.
 ## Inputs/gaps
 
 - Runner choice: use the stable `macos-26` arm64 image and select its Xcode
-  26.6 installation explicitly. The official runner image manifest currently
-  lists Xcode 26.6 and iOS SDK 26.4; log `xcodebuild -version` and
-  `xcrun --sdk iphoneos --show-sdk-version` in every run. Xcode 27 is in
-  public preview and is not the default. **VERIFY:** confirm the image still
-  contains these versions when the workflow runs.
+  26.6 installation explicitly. The workflow logs both numbers with the command
+  that produced them, because they are different things: **Xcode 26.6**
+  (`xcodebuild -version`) is the installation, and the **iPhoneOS SDK 26.5**
+  (`xcrun --sdk iphoneos --show-sdk-version`) is the SDK inside it. The earlier
+  "iOS SDK 26.4" figure in this document came from the image manifest, not from
+  a run; PROGRESS.md's run `38628969464` reported Xcode 26.6 / iOS SDK 26.5,
+  and `build/ntdll-unix/server_ios.c` records `ri_page_wait_time_mach` as
+  absent from `rusage_info_v6` in the 26.5 SDK. The selection step now fails
+  with the list of installed Xcodes if `Xcode_26.6.app` is not there, instead
+  of letting `xcode-select` fail on a path. Xcode 27 is in public preview and
+  is not the default. **VERIFY:** confirm the image still contains these
+  versions when the workflow runs.
 - llvm-mingw: Madeira documents release `20260421` and SHA-256
   `bd85a3975723815cef28dbbd2ca2cb0c926f6b348a12a0453f39f7af273cb3f7`.
 - LLVM iOS and host builds: Madeira documents LLVM revision `8dfdcc7b7` and
@@ -44,6 +51,47 @@ path. The script has not yet run on macOS, so clean-build success is unproven.
 - Sign disabled for build artifact; unsigned IPA is not installable until the
   user signs/sideloads it.
 
+## What the workflow now verifies
+
+- **Toolchain cache.** `scripts/bootstrap.sh` is the only validator of the
+  restored `toolchains/` tree: it reuses `llvm-project` only when the checkout is
+  at the LLVM pin, `llvm-host-build` only when `bin/llvm-tblgen` exists (and the
+  source is at the pin), and `llvm-ios-build` only when
+  `include/llvm/Config/llvm-config.h` and `lib/*.a` exist; anything else is
+  rebuilt there, so a cache hit is cheap and a damaged cache still ends
+  complete. The pinned sources are always fetched. The cache *save* is skipped
+  on an exact-key hit, because `actions/cache/save` cannot reserve a key that
+  already exists. `tests/host/check-toolchain-cache.py` runs both paths.
+- **FreeType.** `build/freetype-ios/build.sh` verifies the pinned commit, then
+  the archive, its arm64 slice and both generated headers
+  (`build/include/freetype/config/{ftconfig.h,ftoption.h}`) plus the source
+  `research/freetype/include/ft2build.h`, and fails if any is absent.
+  `build/ntdll-unix/build.sh` and `build/win32u-unix/build.sh` refuse to build
+  their font translation units without those headers.
+- **Wine server base archive.** `build/wineserver/build.sh` builds its own
+  base `libwineserver.a` from the pinned submodule's `server/Makefile.in`
+  (`build_base_from_source`), then swaps in the iOS-patched objects as before;
+  a developer's pre-existing `app/Madeira/libwineserver.a` is still honoured.
+  `tests/host/check-wineserver-base.py` runs the script end to end in a
+  sandbox (stub `xcrun`/`ar`/`llvm-objcopy`) and pins the member set, the
+  object swap, the rename sweep and both failure diagnostics.
+- **Packaged artifact.** `tools/validate-ipa.sh` (called by
+  `scripts/build-ipa.sh`, exercised by
+  `tests/host/check-ipa-validation.py`) checks the archive's
+  `Payload/<App>.app/Info.plist`, that `CFBundleExecutable` names a file that is
+  in the bundle *and* in the archive, that `Payload` holds exactly one `.app`,
+  that the executable has an arm64 slice, that no forbidden converter/Microsoft
+  runtime file is inside, and that `SHA256SUMS` is the hash of that same IPA
+  (`shasum -a 256 -c`).
+- **What the run produced.** `scripts/build-ipa.sh` writes
+  `artifacts/build-status.txt` (`IPA_PRESENT=1` with path, arch and hash, or
+  `IPA_PRESENT=0` for a stage-only dispatch); the workflow prints it in a
+  "Report build result" step and a "Report stage-only run" step says plainly
+  that a stage-only dispatch produces no IPA.
+- **Host regression checks.** A `host-checks` job runs the `tests/host` suite
+  (a step per check). The checks that need the wine/DXMT/FEX submodules or a
+  Swift toolchain are not in it; they are listed in the job's comment.
+
 ## Acceptance evidence still required
 
 1. A clean workflow clone resolves selected build submodules without fetching
@@ -51,11 +99,14 @@ path. The script has not yet run on macOS, so clean-build success is unproven.
 2. CI builds from pinned sources without user game/runtime files or proprietary
    Apple converter assets.
 3. IPA archive contains `Payload/<App>.app/Info.plist` and executable; record
-   SHA-256 and build duration.
+   SHA-256 and build duration. (The structural checks are in place; no run of
+   the full path has produced an IPA yet.)
 4. The workflow uploads artifacts only when the repository variable
-   `WINEPHONE_BINARY_RELEASE_CLEARED` is exactly `true`. Keep it unset until
-   the Wine notice conflict and LGPL relink route have been reviewed and
-   resolved. Only then upload the IPA or create a public release.
+   `WINEPHONE_BINARY_RELEASE_CLEARED` is exactly `true`, and only after
+   `shasum -a 256 -c artifacts/SHA256SUMS` verifies the file being uploaded.
+   Keep the variable unset until the Wine notice conflict and LGPL relink route
+   have been reviewed and resolved. Only then upload the IPA or create a public
+   release.
 5. Device installation and JIT remain untested until user supplies device logs.
 
 ## Current runner source

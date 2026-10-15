@@ -72,3 +72,104 @@
 - **Impact:** Without the headers, `dwrite_unixlib` and `winegstreamer_unixlib` fail as soon as B-009 is fixed, so `libntdll_unix.a` still cannot be linked.
 - **Next path:** `build/wine-macos/configure.sh` now generates them in `wine/build-macos/include` — the tree every unix side already includes — with `make -C wine/build-macos/tools/widl` (only when the binary is absent) followed by `make -C wine/build-macos/include`, and prints `present`/`MISSING` for all four headers. It is deliberately best-effort: a failure is printed and the stage continues, so the diagnosis stays with `build/ntdll-unix/build.sh:26-73` and any compile still fails loudly with its command line.
 - **Status:** Fix added, **UNVERIFIED**: the make invocations were read out of makedep/configure, not executed (this worktree has no macOS, no bison/flex and no root, so no Wine build tree can be generated); whether `make -C include` needs further generated sources first is unknown.
+
+## B-011: the unix-side header diagnostic named two paths that are not dependencies
+
+- **Evidence:** run `38651245572`'s diagnostic block reported
+  `MISSING: wine/build-arm64ec/include/dwrite_3.h` and
+  `MISSING: build/freetype-ios/build/include/ft2build.h`. Neither is a real
+  dependency of the `wine-ntdll-unix` stage:
+  - `wine/build-arm64ec` is the ARM64EC PE tree, created by
+    `build/wine-pe/build-ntdll.sh` (`:20`) which `scripts/build-ipa.sh` runs
+    *after* `wine-ntdll-unix`; the widl-generated `dwrite_3.h`/`d2d1.h` the
+    compile needs come from `wine/build-macos/include`, which
+    `build/wine-macos/configure.sh` generates and `compile_unixlib` already
+    passes as `-I"$WINE_BUILD/include"`. The extra `-I` flag pointed at a tree
+    that cannot exist yet.
+  - FreeType's CMake build (freetype `42608f77f2`, `CMakeLists.txt`) writes
+    `${PROJECT_BINARY_DIR}/include/freetype/config/{ftconfig.h,ftoption.h}` and
+    globs `include/ft2build.h` from the *source* tree; it never writes
+    `ft2build.h` into the build tree, so that path does not exist on any
+    configuration. What the compile really needs from the build tree is the
+    generated `ftconfig.h` (the UNIX one, from `builds/unix/ftconfig.h.in`),
+    named *before* `research/freetype/include` so it wins over the ANSI copy
+    there — the order `build/win32u-unix/build.sh` has always used. Comparing
+    the two files: `builds/unix/ftconfig.h.in` differs from
+    `include/freetype/config/ftconfig.h` only by `#undef HAVE_UNISTD_H` /
+    `#undef HAVE_FCNTL_H`, which CMake turns into defines when the headers are
+    present; the include list below them is identical.
+- **Impact:** the diagnostic reported two false MISSING lines on a healthy tree
+  and never checked the generated header the compile depends on.
+- **Next path:** `build/ntdll-unix/build.sh` now splits its list into
+  `REQUIRED_HEADERS` (checked, and a miss exits 1 by name before the compiles)
+  and `INFORMATIONAL_PATHS` (the arm64ec tree and `libfreetype.a`, named so the
+  pipeline order is visible), and the comment records which stage produces each
+  one. `dwrite_unixlib` now gets `-I"$FREETYPE_INC_BUILD" -I"$FREETYPE_INC_SRC"`;
+  `build/win32u-unix/build.sh` and `build/freetype-ios/build.sh` check the same
+  pair (the producer verifies the archive, its arm64 slice, both generated
+  headers and the source `ft2build.h`).
+- **Status:** fixed in the tree, **UNVERIFIED** until a `wine-ntdll-unix` stage
+  runs again (this worktree has no macOS and no Wine source to execute it).
+
+## B-012: nothing in CI ran the `tests/host` suite
+
+- **Evidence:** the repository's only workflow, `.github/workflows/build-ipa.yml`,
+  had no step that invoked `tests/host/*`. Ten checks assert that it does, and
+  failed on a clean checkout: `check-lean-diag.py:252`,
+  `check-power-probe.py:262`, `check-eco-native.py:137`,
+  `check-quiet-log.py:201`, `check-srv-direct.py:588`,
+  `check-srv-fd-reply.py`, `check-srv-eco-follow.py`,
+  `check-msc-unbounded-retry.py:286`, `check-x64-image-nocopy.py:160`
+  (all "CI runs this check"), plus `check-shader-pack.py:970` and
+  `check-vcruntime-mfc.py:38`, which index specific steps of a workflow that no
+  longer has them.
+- **Impact:** ~150 regression checks, several of which guard the exact defects
+  B-009/B-010 describe, were never run by CI; a green `build-ipa` job said
+  nothing about them.
+- **Next path:** a new `host-checks` job (`ubuntu-latest`) runs the 106 checks
+  that need no submodule and no Swift toolchain, one step per check, named
+  `Check <name>` as the checks expect. The remaining checks need the wine, DXMT
+  or FEX submodules or `swiftc`; they run locally (with the submodules
+  initialised) and are named in the job's comment.
+  `check-vcruntime-mfc.py` and `check-shader-pack.py` were **not** changed: the
+  former asserts Madeira's step that fetches Microsoft's runtime DLLs, which
+  WinePhone deliberately refuses (`DECISIONS.md`, IPA_BUILD.md item 4,
+  `tools/validate_release_inputs.py`), and the latter indexes a step this
+  workflow does not have. Both are recorded here rather than edited, because
+  changing an inherited test to match a different release policy is a decision
+  for the project, not a build repair.
+- **Status:** job added; it ran here on the same checks
+  (`python3 tests/host/check-<name>.py`), 106/106 passing on Linux. **UNVERIFIED**
+  on a GitHub runner.
+
+## B-013: the wineserver stage had no producer for its base `libwineserver.a`
+
+- **Evidence:** the full-path run at `3daa133` (user-supplied log) reached
+  `=== wineserver ===` immediately after `wine-ntdll-unix` succeeded 37/37 and
+  died with `ERROR: No base libwineserver.a found`, exit 1. The stage
+  (`build/wineserver/build.sh`, old `:16-22`) required the archive to already
+  exist at `build/wineserver/obj/libwineserver.a` or `app/Madeira/libwineserver.a`.
+  That file is git-ignored (`.gitignore:33`), `git log --all --
+  app/Madeira/libwineserver.a` is empty, and no script in the repository
+  produced it: it was an out-of-band artifact of the original development
+  machine. The Xcode project links it (`project.pbxproj:74`), so it is a real
+  input, not a diagnostic nicety.
+- **Impact:** every clean checkout — i.e. every CI run — fails at this stage,
+  so `win32u-unix`, `wine-pe-*`, DXMT, `xcodebuild` and the IPA can never run.
+- **Next path:** `build/wineserver/build.sh` now produces the base itself:
+  `build_base_from_source()` compiles every `.c` in the pinned submodule's
+  `server/Makefile.in` `SOURCES` (43 files at wine `9129e968`) for iOS arm64
+  with the stage's own `CC_FLAGS`, under their natural member names
+  (`foo.c -> foo.o`) so the existing `PATCHED_FILES`/`REPLACEMENTS` swap and the
+  `llvm-objcopy` symbol-rename sweep still apply object-by-object.
+  Resolution order preserves local workflows: an existing `obj/` archive, then
+  a developer's `app/Madeira/libwineserver.a`, else the source build. `$0 base`
+  builds only the archive; a missing submodule names
+  `git submodule update --init wine` as the prerequisite; an unparseable
+  `SOURCES` list refuses to build an empty archive rather than satisfying the
+  file check. `tests/host/check-wineserver-base.py` runs the real script end to
+  end in a sandbox (stub `xcrun`/`ar`/`llvm-objcopy`) and pins the member set,
+  the object swap, the rename sweep and the failure diagnostics.
+- **Status:** repaired in the tree; the 43 real iOS compiles are **UNVERIFIED**
+  until a full workflow run. By design that run reports every failing
+  `server/*.c` at once (counted summary) instead of one per dispatch.

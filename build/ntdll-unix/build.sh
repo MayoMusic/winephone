@@ -22,6 +22,19 @@ GNUTLS_PREFIX="$REPO_ROOT/toolchains/gnutls-ios"
 FFMPEG_PREFIX="$REPO_ROOT/toolchains/ffmpeg-ios"
 FREETYPE_SRC="$REPO_ROOT/research/freetype"
 FREETYPE_BUILD="$REPO_ROOT/build/freetype-ios/build"
+# FreeType has two include roots and a consumer needs both. Its CMake build
+# writes the *generated* configuration headers (the UNIX ftconfig.h built from
+# builds/unix/ftconfig.h.in, and ftoption.h) into <build>/include
+# (freetype/CMakeLists.txt sets FTCONFIG_H_NAME/FTOPTION_H_NAME to
+# ${PROJECT_BINARY_DIR}/include/freetype/config/), and ft2build.h is a tracked
+# *source* header under the clone's include/. The build root must come first so
+# the generated ftconfig.h wins over the ANSI one in the source tree, which is
+# the configuration libfreetype.a itself was compiled with. FreeType's CMake
+# build never writes ft2build.h into <build>/include: that path does not exist
+# on any configuration and is not checked. build/win32u-unix/build.sh has always
+# used these two dirs in this order.
+FREETYPE_INC_SRC="$FREETYPE_SRC/include"
+FREETYPE_INC_BUILD="$FREETYPE_BUILD/include"
 
 echo "=== ntdll unix header diagnostic ==="
 echo "  REPO_ROOT      = $REPO_ROOT"
@@ -32,25 +45,61 @@ echo "  FREETYPE_SRC   = $FREETYPE_SRC"
 echo "  FREETYPE_BUILD = $FREETYPE_BUILD"
 echo "  include flags  = -I\"$WINE_BUILD/include\" -I\"$GNUTLS_PREFIX/include\" (bcrypt/secur32/crypt32)"
 echo "                   -I\"$FFMPEG_PREFIX/include\" (winegstreamer)"
-echo "                   -I\"$FREETYPE_SRC/include\" -I\"$REPO_ROOT/wine/build-arm64ec/include\" (dwrite)"
+echo "                   -I\"$WINE_BUILD/include\" -I\"$FREETYPE_INC_BUILD\" -I\"$FREETYPE_INC_SRC\" (dwrite)"
 if [ -n "${WINEPHONE_TOOLCHAIN_CACHE_HIT:-}" ]; then
     echo "  toolchain cache exact-key hit: $WINEPHONE_TOOLCHAIN_CACHE_HIT"
 else
     echo "  toolchain cache exact-key hit: (not passed to this step)"
 fi
-for h in "$WINE_BUILD/include/config.h" \
-         "$WINE_BUILD/include/dwrite_3.h" \
-         "$WINE_BUILD/include/d2d1.h" \
-         "$WINE_BUILD/include/mfobjects.h" \
-         "$REPO_ROOT/wine/build-arm64ec/include/dwrite_3.h" \
-         "$GNUTLS_PREFIX/include/gnutls/gnutls.h" \
-         "$GNUTLS_PREFIX/include/gnutls/pkcs12.h" \
-         "$FFMPEG_PREFIX/include/libavcodec/avcodec.h" \
-         "$FREETYPE_SRC/include/ft2build.h" \
-         "$FREETYPE_BUILD/include/ft2build.h" \
-         "$FREETYPE_BUILD/libfreetype.a"; do
+
+# Headers a compile in THIS script cannot do without. config.h and the
+# widl-generated dwrite_3.h/d2d1.h/mfobjects.h come from the configured Wine
+# tree (build/wine-macos/configure.sh: build/ntdll-unix can run it earlier with
+# only_stage=wine-ntdll-unix); gnutls/ffmpeg come from their stage; the FreeType
+# pair comes from build/freetype-ios/build.sh. A missing one means the stage
+# cannot pass, so it is reported once, by name, instead of as N compile failures.
+# dwrite_unixlib needs dwrite_3.h/d2d1.h (wine/dlls/dwrite/dwrite_private.h:24-25)
+# and winegstreamer_unixlib needs mfobjects.h (wine/dlls/winegstreamer/unixlib.h:32).
+REQUIRED_HEADERS=(
+    "$WINE_BUILD/include/config.h"
+    "$WINE_BUILD/include/dwrite_3.h"
+    "$WINE_BUILD/include/d2d1.h"
+    "$WINE_BUILD/include/mfobjects.h"
+    "$GNUTLS_PREFIX/include/gnutls/gnutls.h"
+    "$GNUTLS_PREFIX/include/gnutls/pkcs12.h"
+    "$FFMPEG_PREFIX/include/libavcodec/avcodec.h"
+    "$FREETYPE_INC_SRC/ft2build.h"
+    "$FREETYPE_INC_BUILD/freetype/config/ftconfig.h"
+    "$FREETYPE_INC_BUILD/freetype/config/ftoption.h"
+)
+# Named for the record, but absent by design at this point in the pipeline:
+# wine/build-arm64ec is the ARM64EC PE tree and wine-pe-ntdll (which builds it,
+# build/wine-pe/build-ntdll.sh:20) runs after this stage in scripts/build-ipa.sh.
+INFORMATIONAL_PATHS=(
+    "$FREETYPE_BUILD/libfreetype.a"
+    "$WINE_SRC/build-arm64ec/include/dwrite_3.h"
+)
+for h in "${REQUIRED_HEADERS[@]}"; do
     if [ -e "$h" ]; then echo "  present: $h"; else echo "  MISSING: $h"; fi
 done
+for h in "${INFORMATIONAL_PATHS[@]}"; do
+    if [ -e "$h" ]; then echo "  present (informational): $h"; else echo "  absent  (not required by this stage): $h"; fi
+done
+MISSING_REQUIRED=""
+for h in "${REQUIRED_HEADERS[@]}"; do
+    [ -e "$h" ] || MISSING_REQUIRED="$MISSING_REQUIRED $h"
+done
+if [ -n "$MISSING_REQUIRED" ]; then
+    echo "" >&2
+    echo "error: the wine-ntdll-unix stage is missing required headers:$MISSING_REQUIRED" >&2
+    echo "  config.h + dwrite_3.h/d2d1.h/mfobjects.h : run the wine-macos stage first" >&2
+    echo "                                             (build/wine-macos/configure.sh)" >&2
+    echo "  gnutls/*                                 : run the gnutls stage" >&2
+    echo "  libavcodec/avcodec.h                     : run the ffmpeg stage" >&2
+    echo "  freetype ft2build.h + ftconfig.h/ftoption.h : run build/freetype-ios/build.sh" >&2
+    echo "  (a stage-only dispatch needs the FreeType workflow step or its cache)" >&2
+    exit 1
+fi
 echo "--- ls $REPO_ROOT/toolchains ---"
 ls -la "$REPO_ROOT/toolchains" 2>&1 || echo "  (no toolchains directory)"
 echo "--- configured/generated Wine trees ---"
@@ -176,11 +225,14 @@ compile_unixlib "$WINE_SRC/dlls/secur32/schannel_gnutls.c" "secur32_unixlib" "se
 # __wine_unix_call from dwrite.dll failed and get_glyph_bbox never ran —
 # every glyph run reported an EMPTY bbox and Chromium drew no text at all.
 # freetype is static here, so dwrite_freetype_ios.c rewrites dlopen/dlsym.
-# dwrite.h/dwrite_3.h are widl-generated and only exist in the arm64ec
-# build tree, so that include dir is named explicitly here.
+# dwrite_3.h/d2d1.h are widl-generated; compile_unixlib already passes
+# -I"$WINE_BUILD/include", which is where build/wine-macos/configure.sh
+# generates them. Nobody else has them yet: wine/build-arm64ec is built later,
+# by wine-pe-ntdll, and does not exist while this stage runs. FreeType: the
+# generated config dir first, then the source root that holds ft2build.h.
 compile_unixlib "$BUILD_DIR/dwrite_freetype_ios.c" "dwrite_unixlib" "dwrite" \
-    -I"$WINE_SRC/dlls/dwrite" -I"$FREETYPE_SRC/include" \
-    -I"$REPO_ROOT/wine/build-arm64ec/include"
+    -I"$WINE_SRC/dlls/dwrite" \
+    -I"$FREETYPE_INC_BUILD" -I"$FREETYPE_INC_SRC"
 compile_unixlib "$CRYPTO_DIR/crypt32_unixlib_ios.c" "crypt32_unixlib" "crypt32" \
     -I"$WINE_SRC/dlls/crypt32" -I"$GNUTLS_PREFIX/include" \
     -include "$CRYPTO_DIR/ios_gnutls_shim.h"
