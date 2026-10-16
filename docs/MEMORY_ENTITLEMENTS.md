@@ -54,20 +54,85 @@ inert.
 
 ## About GetMoreRam
 
-`https://github.com/byeCl0ud/GetMoreRam` was checked and **is not reachable**.
-The GitHub API returns 404 for the repository and for the user `byeCl0ud`, a
-direct HTTPS GET returns 404, and a repository search for `GetMoreRam` returns
-nothing. Its contents, dependencies and implementation are therefore unknown
-here, and nothing in this tree is derived from it.
+**Correction.** An earlier version of this file said the repository was
+unreachable. That was wrong, and the cause is worth recording: the repository
+search that would have found it failed silently, and "the search returned
+nothing" was read as "the repository does not exist". The URL in the request,
+`github.com/byeCl0ud/GetMoreRam`, does 404 - the user `byeCl0ud` does not exist -
+but the project lives at **`github.com/hugeBlack/GetMoreRam`** (389 stars,
+Swift, created 2025-03-15). Searching, not guessing, is what finds a moved
+project.
 
-What can be said without it: the app's setup guide used to instruct "install
-GetMoreRam and run it to inject memory entitlements into your App ID". That
-instruction has been corrected, because the part of it that is checkable is
-wrong. Injecting a key into an App ID is a Developer Portal operation, it needs
-the capability to already be grantable to that team, and a free Apple Account
-is not. The guide now describes the capability, the account requirement, and
-the signing step, and does not tell the reader to install a tool whose behaviour
-this project cannot verify.
+Its mechanism is one line of code, in `GetMoreRam/AppIDViewModel.swift`:
+
+```swift
+let cool = try await AppleAPI.shared.updateAppID(
+    appID, capabilities: ["INCREASED_MEMORY_LIMIT"], team: team, session: session)
+```
+
+It is a **StosSign wrapper** (the signing service behind SideStore/AltStore). It
+signs into the Apple Developer Portal with your own Apple ID - Anisette data
+fetching is taken from SideStore - lists your team's App IDs, and calls
+`updateAppID` to enable a capability on one. You then reinstall from
+SideStore/AltStore, which re-signs against a profile that now carries the
+entitlement.
+
+So it does not add an entitlement to a binary. It changes the App ID in the
+Developer Portal, and the entitlement arrives later because Apple then issues a
+profile containing it.
+
+**What it can and cannot do, checked against the repository:**
+
+| Query | Hits |
+|---|---|
+| `INCREASED_MEMORY_LIMIT` | 1 (`AppIDViewModel.swift`) |
+| `EXTENDED_VIRTUAL_ADDRESSING` | **0** |
+| `extended-virtual` | **0** |
+
+It enables exactly one capability and has no code path for the other. It also
+requires portal access to a team that already holds the capability, so it is not
+a route around the paid-account requirement.
+
+**Therefore it cannot fix the ROTTR failure.** It grants the RAM-limit
+entitlement, and the ROTTR failure is an address-space reservation. This is the
+same conclusion the Apple documentation gives, now corroborated by the tool's
+own source rather than by inference.
+
+## What Winlator does differently, and what transfers
+
+`github.com/brunodev85/winlator` (19,484 stars) is the Android equivalent: Wine
+plus Box64 running x86 Windows games on ARM. It faces the same guest, and AAA
+titles do start there. Two things are worth separating.
+
+**What does not transfer: the large reservation itself.** Box64 maps the guest's
+x86_64 address space into the host's. An Android 64-bit process has a far larger
+address space than an iOS process without Extended Virtual Addressing, so a
+3 GB contiguous `VirtualAlloc` simply has somewhere to land. There is no trick
+in Box64 that manufactures contiguous address space - the difference is the
+platform's ceiling. Nothing here makes iOS more like Android in that respect.
+
+**What does transfer: the strong memory model.** Winlator's
+`app/src/main/assets/box64/default.box64rc` sets
+`BOX64_DYNAREC_STRONGMEM=1` for exactly the titles that stress threading -
+witcher3, Dishonored, MassEffect, FalloutNV, Borderlands, Resident Evil 2 and
+3, Just Cause 3 and 4 - and `BOX64_DYNAREC_WEAKBARRIER=1` for Resident Evil 2,
+Resident Evil 3 and Just Cause. The option is documented as "emulation of x86
+strong memory model", levels 0 to 4, and the box64 trackers describe it as
+fixing memory-barrier-dependent behaviour at a CPU speed cost.
+
+x86 is a strongly ordered architecture and ARM is weakly ordered. Wine on
+ARM64EC has to impose x86's ordering on translated code, and a game that
+misses it does not fail with a clear diagnostic - it fails as an intermittent
+crash in threaded code, long after start-up, which is exactly the kind of
+problem that is expensive to chase later.
+
+**This has not been audited in this tree.** It is recorded as an investigation
+item, not as a finding: no Wine or FEX source has been read for memory-barrier
+handling, and no threaded game has been run.
+
+Winlator's per-game `.box64rc` profile - one file of overrides keyed by
+executable name - is the same shape as this project's per-game profile system,
+which is a point in favour of that design rather than evidence about anything.
 
 ## What the app does now
 
