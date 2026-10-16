@@ -2470,12 +2470,13 @@ void ios_jumbo_holdback_init( void )
      * never be mapped, and the one reserve this exists to serve still failed.
      *
      * The hole is real free space, but the wrong end of it. TASK_VM_INFO already
-     * carries min_address, and the walk was reading max_address only. Starting at
-     * min_address skips addresses the kernel will refuse anyway and lets the same
-     * 4136 MB hole be found where it can actually be reserved. Holes below it are
-     * not usable address space, so nothing that ever worked is lost.
-     */
-    floor = (unsigned long long)vmi.min_address;
+     * carries min_address and the walk read max_address only. Starting at
+     * min_address skips addresses the kernel refuses anyway, so nothing that
+     * ever worked is lost.
+     *
+     * Read only on the success path: task_info does not write vmi when it fails. */
+    floor = (task_info( mach_task_self(), TASK_VM_INFO, (task_info_t)&vmi, &cnt ) == KERN_SUCCESS)
+                ? (unsigned long long)vmi.min_address : 0;
     if (!floor) floor = 0x100000000ull;
     if (floor < (unsigned long long)ceiling)
     {
