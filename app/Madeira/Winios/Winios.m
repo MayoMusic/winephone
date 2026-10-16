@@ -1285,7 +1285,36 @@ static void winios_ensure_compositor(void) {
      * teal (until explorer's own background paint works) */
     g_compositor_view.backgroundColor = UIColor.blackColor;
     g_desk_bg = [CALayer layer];
-    g_desk_bg.backgroundColor = [UIColor colorWithRed:0.0 green:0.502 blue:0.502 alpha:1.0].CGColor;
+    /* madeira-bcd: the desktop-area backdrop is the bundled wallpaper when the
+     * app ships one, and classic teal when it does not -- the teal was the
+     * placeholder from before explorer's own background paint worked, and a
+     * session without the image must look exactly as it did then.
+     *
+     * contentsGravity = resizeAspectFill so a 16:9 image covers the desktop
+     * area (winios_layout_compositor sizes this layer to the FITTED desktop,
+     * not the letterbox) instead of stretching: the wallpaper is 1672x941 and
+     * a stretched copy looks obviously wrong at any other aspect. Contents are
+     * set once here, on the main thread, and the frame changes afterwards only
+     * -- contentsGravity does that on its own, so no re-layout hook is needed.
+     *
+     * winios_drop_compositor nils g_desk_bg, so a later attach re-reads the
+     * image; UIImage caches byName, so that costs nothing after the first. */
+    {
+        UIImage *wall = [UIImage imageNamed:@"MadeiraWallpaper"];
+        g_desk_bg.backgroundColor = [UIColor colorWithRed:0.0 green:0.502 blue:0.502 alpha:1.0].CGColor;
+        if (wall)
+        {
+            g_desk_bg.contents = (__bridge id)wall.CGImage;
+            g_desk_bg.contentsGravity = kCAGravityResizeAspectFill;
+            g_desk_bg.contentsScale = wall.scale;
+            fprintf( stderr, "[winios] desktop backdrop: wallpaper %dx%d\n",
+                     (int)wall.size.width * (int)wall.scale, (int)wall.size.height * (int)wall.scale );
+            fflush( stderr );
+        }
+        else
+            fprintf( stderr, "[winios] desktop backdrop: no MadeiraWallpaper in the bundle -- classic teal\n" );
+        fflush( stderr );
+    }
     [g_compositor_view.layer addSublayer:g_desk_bg];
     [win addSubview:g_compositor_view];
     winios_layout_compositor();

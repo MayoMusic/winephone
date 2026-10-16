@@ -1,0 +1,18 @@
+{
+  "images": [
+    {
+      "filename": "MadeiraWallpaper-1x.png",
+      "idiom": "universal",
+      "scale": "1x"
+    },
+    {
+      "filename": "MadeiraWallpaper-2x.png",
+      "idiom": "universal",
+      "scale": "2x"
+    }
+  ],
+  "info": {
+    "author": "xcode",
+    "version": 1
+  }
+}
