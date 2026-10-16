@@ -9533,6 +9533,89 @@ static void ios_exe_win_note_dead_peb( void *dead_peb )
              (unsigned long)ios_exe_win_img_size, dead_peb );
 }
 
+/* ml1142: report what is actually mapped across an exact requested range.
+ *
+ * A free-range total is not an answer about ONE range. A gap walk says "there
+ * are N contiguous bytes somewhere"; the question here is whether this
+ * specific [base, base+size) is unmapped, and nothing short of asking the VM
+ * answers that. The 16:35:26 run reported 5376 MB free at jit pool init and
+ * then a 3072 MB request inside that gap returned KERN_NO_SPACE, so the two
+ * have to be reconciled against the VM, not against each other.
+ *
+ * Uses mach_vm_region_recurse, which descends submaps, so a region that exists
+ * only as a submap inside a parent mapping is still found. A plain
+ * mach_vm_region stops at the parent and would report nothing, which is one way
+ * a range can look free and still be occupied.
+ *
+ * Gated on jumbo-probe = 1 and on size >= 64 MB: this is not a per-allocation
+ * path and stays off by default.
+ */
+static void ios_af_probe_range( const void *base, size_t size )
+{
+    mach_vm_address_t lo = (mach_vm_address_t)base;
+    mach_vm_address_t hi = lo + (mach_vm_address_t)size;
+    mach_vm_address_t addr;
+    unsigned hits = 0;
+    static unsigned long probe_n;
+
+    if (size < 0x4000000ULL) return;                       /* < 64 MB: not our case */
+    if (madeira_cfg_int( "jumbo-probe", 0 ) != 1) return;
+    if (++probe_n > 16) return;                            /* bounded */
+
+    task_vm_info_data_t vmi;
+    mach_msg_type_number_t vc = TASK_VM_INFO_COUNT;
+    unsigned long long ceiling = 0, lowest = 0;
+    if (task_info( mach_task_self(), TASK_VM_INFO, (task_info_t)&vmi, &vc ) == KERN_SUCCESS)
+    {
+        ceiling = (unsigned long long)vmi.max_address;
+        lowest  = (unsigned long long)vmi.min_address;
+    }
+
+    dprintf( 2, "[range-probe] #%lu request [0x%llx,0x%llx) = %llu MB\n",
+             probe_n, (unsigned long long)lo, (unsigned long long)hi,
+             (unsigned long long)size >> 20 );
+    dprintf( 2, "[range-probe]   task min=0x%llx max=0x%llx  %s\n", lowest, ceiling,
+             (ceiling && hi > ceiling) ? "REQUEST ENDS ABOVE THE CEILING"
+                                       : "request ends inside the task map" );
+
+    addr = lo;
+    while (addr < hi)
+    {
+        mach_vm_address_t cur = addr;
+        mach_vm_size_t rsize = 0;
+        vm_region_submap_info_data_64_t sub;
+        mach_msg_type_number_t c3 = VM_REGION_SUBMAP_INFO_COUNT_64;
+        natural_t dd = 0;
+        mach_vm_address_t next;
+
+        if (mach_vm_region_recurse( mach_task_self(), &cur, &rsize, &dd,
+                                    (vm_region_recurse_info_t)&sub, &c3 ) != KERN_SUCCESS)
+        {
+            dprintf( 2, "[range-probe]   recurse failed at 0x%llx -- the walk cannot "
+                    "vouch for the rest of this range\n", (unsigned long long)cur );
+            break;
+        }
+        next = cur + rsize;
+
+        if (cur < hi && next > lo)                          /* intersects the request */
+        {
+            if (hits < 24)
+                dprintf( 2, "[range-probe]   HIT [0x%llx,0x%llx) prot=%d/%d inh=%d "
+                        "tag=%d submap=%u%s\n",
+                         (unsigned long long)cur, (unsigned long long)next,
+                         (int)sub.protection, (int)sub.max_protection,
+                         (int)sub.inheritance, (int)sub.user_tag, (unsigned)dd,
+                         (cur < lo) ? "  <-- STARTS BEFORE THE REQUEST" : "" );
+            hits++;
+        }
+        if (next <= cur || next > hi) { addr = next > hi ? hi : next; break; }
+        addr = next;
+    }
+
+    dprintf( 2, "[range-probe]   %u mapping(s) intersect the request -- %s\n",
+             hits, hits ? "THE RANGE IS NOT FREE" : "no mapping covers it" );
+}
+
 static void *anon_mmap_tryfixed( void *start, size_t size, int prot, int flags )
 {
     ios_pool_va_warn( "anon_mmap_tryfixed", start, size );
@@ -9569,6 +9652,7 @@ static void *anon_mmap_tryfixed( void *start, size_t size, int prot, int flags )
          * the other. Record the raw kr so the allocation-failure probe can name
          * what the kernel actually said. */
         ios_af_set( 6, (int)ret, start, size );
+        ios_af_probe_range( start, size );   /* ml1142: what is mapped across THIS range */
         errno = (ret == KERN_NO_SPACE ? EEXIST : ENOMEM);
         ptr = MAP_FAILED;
     }
