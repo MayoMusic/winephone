@@ -151,13 +151,25 @@ compile_objc "$DXMT_SRC/winemetal/unix/winemetal_unix.c" winemetal_unix
 compile_objc "$DXMT_SRC/winemetal/unix/cache.c"          cache
 
 echo "=== airconv (C++ 20, needs LLVM headers) ==="
-# Keep iOS adaptations as a reviewable WinePhone patch, not edits to the dxmt
-# submodule. Same idempotent form as build/fex-ios/build.sh.
-AIRCONV_PATCH="$REPO_ROOT/patches/dxmt-airconv-noapple-air.patch"
-if ! git -C "$DXMT_ROOT" apply --reverse --check "$AIRCONV_PATCH" >/dev/null 2>&1; then
-    git -C "$DXMT_ROOT" apply --check "$AIRCONV_PATCH"
-    git -C "$DXMT_ROOT" apply "$AIRCONV_PATCH"
-fi
+# Keep iOS adaptations as reviewable WinePhone patches, not edits to the dxmt
+# submodule. Same idempotent form as build/fex-ios/build.sh: if the patch is
+# already applied the reverse check passes and the block is skipped.
+#
+#   dxmt-airconv-noapple-air      drops Apple's licence-bound AIR headers and the
+#                                 three optional intrinsic blobs with them (B-016)
+#   dxmt-winemetal-static-implibs marks the winecrt0 and dbghelp lookups static,
+#                                 because Wine's import libraries are static
+#                                 archives and meson otherwise searches for a
+#                                 shared one and reports "not found" for archives
+#                                 that are present and verified
+for _p in dxmt-airconv-noapple-air dxmt-winemetal-static-implibs; do
+    _PATCH="$REPO_ROOT/patches/$_p.patch"
+    if ! git -C "$DXMT_ROOT" apply --reverse --check "$_PATCH" >/dev/null 2>&1; then
+        git -C "$DXMT_ROOT" apply --check "$_PATCH"
+        git -C "$DXMT_ROOT" apply "$_PATCH"
+        echo "  applied $_p.patch"
+    fi
+done
 for cpp in airconv_context.cpp air_type.cpp air_signature.cpp air_operations.cpp \
            dxbc_converter.cpp dxbc_converter_gs.cpp dxbc_converter_ts.cpp \
            dxbc_converter_basicblock.cpp dxbc_converter_cfg.cpp \

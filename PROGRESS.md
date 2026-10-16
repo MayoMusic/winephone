@@ -291,3 +291,71 @@ not log text). Three runs exist past the 6bde730/3daa133 repairs:
   (`(inputs.only_stage || 'all')`), so no step keys off a named stage and the
   `push` event (unset input) cannot be mistaken for a stage-only run;
   `tests/host/check-ipa-build-graph.py` pins that.
+
+### Clean-build chain advanced to the DXMT PE link (2026-10-16)
+
+Six consecutive runs each removed one blocker, in this order, with every claim
+taken from a downloaded log rather than a report:
+
+1. `38727641709` — cache restore proved: `exact-key hit: true` for both the
+   toolchain and FreeType. B-008/B-009/B-010 close on evidence; `libntdll_unix.a`
+   produced, 37/37.
+2. `38727641709` stopped at the first line of `wineserver`:
+   `ERROR: No base libwineserver.a found`. B-013. The base archive is git-ignored
+   by Madeira and produced by nothing — Wine's `server/Makefile.in` builds only
+   the `wineserver` program. A clean Madeira checkout fails here too. Fixed by
+   building the base from the submodule's own `SOURCES`.
+3. `38825815420` — **wineserver built for the first time**: 44 sources compiled
+   for iOS in 12 s, then `libwin32u_unix.a`. No `BASE_SKIP` entry was needed,
+   which contradicted the earlier "Linux-only sources" hypothesis.
+4. `38825815420` / `38828999867` — `wine-pe-ntdll`: building the whole
+   `dlls/ntdll` directory also built the host `ntdll.so`, whose unix link needs
+   `_ios_avail_phys` — defined only in `build/ntdll-unix/virtual_ios.c`, which
+   belongs to `libntdll_unix.a`. `system.c`'s comment blames
+   `tools/patch-wine-avail-phys.py`, which is not in the repository. The `.so` is
+   never shipped and the PE module does not link it, so build the PE target only.
+5. `38830824987` — that target's path is relative to the build root;
+   `-C arm64ec-windows` fails with "No rule to make target". `wine-pe-ntdll` and
+   `wine-pe-modules` then cleared.
+6. `38832880011` — `dxmt-ios`: 82 of 83 units passed, `airconv_context` failed on
+   `air_msad.h`. Reading the file showed it is 165 lines and uses those three
+   Apple AIR headers for nothing but three optional intrinsic blobs;
+   `initializeModule()` never touches them. B-016 records the licensing decision
+   to stub them rather than ship licence-bound headers.
+7. `38835000672` — **dxmt-ios 83/83**, `libdxmt_unix.a` and `libdxmt_combined.a`
+   created. `meson setup` then failed because only the build directory was
+   passed, leaving meson to take the source from the repository root, which has
+   no `meson.build`.
+8. `38836941062` — meson configured and exposed the real cause: the cross file
+   was `build-aarch64-win.txt`. `dxmt/meson.build:32-38` decides `is_arm64ec` by
+   compiling `#error not arm64ec` unless `__arm64ec__`/`_M_ARM64EC` is defined,
+   so the aarch64 compiler failed that probe and `meson.build:247-260` then chose
+   `aarch64-windows` over `arm64ec-windows`. That produced both the literal
+   "not arm64ec" error and the bogus `winecrt0` lookup, and would have shipped
+   plain-AArch64 PE modules instead of the hybrid ARM64EC images the design
+   depends on. Switched to `build-arm64ec-win.txt` with
+   `-Dwine_build_path=../../wine/build-arm64ec`, which is Madeira's own recipe.
+9. `38838887708` — a new prerequisite stage found three of the four artefacts
+   `winemetal/meson.build:18-25` resolves, with sizes, and named the fourth:
+   `MISSING dlls/dbghelp/arm64ec-windows/libdbghelp.a`.
+10. `38843362962` / `38844655658` — resolving that took three attempts, each of
+    which added information rather than guessing: the archive target is not
+    readable from source because Wine 11 generates makefiles with `tools/makedep`
+    (`configure.ac:2435`); the module directory target does not produce it
+    either; and the build log shows Wine never invokes `winebuild --implib` for
+    dbghelp at all, only for kernelbase, kernel32, ntdll and ucrtbase — Wine
+    builds a module's import library only when something links against it, and
+    nothing links dbghelp. The fix reuses Wine's own argument form, copied from
+    the log rather than invented, and an earlier silent skip was removed by
+    printing every guard condition.
+
+**Method note.** Two of these ten were fixed by reading a guard expression in
+the source (`is_arm64ec`, `initializeModule`) rather than by trying a build
+variant, and two were fixed by adding verification that names the cause instead
+of the symptom. Both approaches paid for themselves immediately; guessing a
+generated make target name cost two full CI cycles.
+
+**Still unproven:** no unsigned IPA has been produced, nothing has been linked
+into an app binary, and nothing has run on a device. The ARM64EC `winemetal`
+and `d3d11` modules, the `xcodebuild` link and the packaging step have not
+completed in any run.
