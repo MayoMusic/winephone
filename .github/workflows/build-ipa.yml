@@ -339,6 +339,8 @@ jobs:
         run: python3 tests/host/check-image-retire.py
       - name: Check input-foreground
         run: python3 tests/host/check-input-foreground.py
+      - name: Check prefix template
+        run: sh tools/check-prefix-template.sh
       - name: Check ipa-build-graph
         run: python3 tests/host/check-ipa-build-graph.py
       - name: Check ipa-validation

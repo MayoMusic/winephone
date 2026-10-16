@@ -347,6 +347,31 @@
   cannot regenerate it, cannot validate it, and if its contents ever need to
   change for a title there is no reproducible way to produce the new one. The
   `check-prefix-template.sh` guard is currently decorative.
+- **What the archive actually contains** (extracted and measured, not assumed):
+  106 directories and 32 files, 4315121 bytes uncompressed. `system.reg` is
+  3723578 of those bytes - 86% - then `user.reg` 66855, `userdef.reg` 4078,
+  `.update-timestamp` 12, and 13 `.ttf` fonts totalling about 460 KB. It also
+  contains `drive_c/windows/system32/chcp.com` (21504 bytes), an MSI
+  (`Installer/81cd.msi`, 22528), five `inf` files and the `drivers/etc` set.
+  So `build-prefix-snapshot.sh`'s own header comment - "strips everything we
+  already ship in the app bundle (PE binaries, NLS, fonts)" - does not describe
+  what ships. That is a documentation defect in the tool, not in the archive.
+- **Provenance mismatch, recorded because it is a trap for whoever regenerates
+  it.** `chcp.com` in the shipped template is `IMAGE_FILE_MACHINE_AMD64`
+  (0x8664), PE32+, console subsystem - a plain x86-64 PE, produced by a
+  `wineboot --init` run off the ARM64EC tree. It is not a hybrid ARM64EC image.
+  It is probably fine at run time, because translating x86-64 guest code is
+  exactly what FEX is for, and **that is not verified**. What matters more is
+  that a *naive* regeneration would silently change the prefix: this project's
+  Wine is configured `--enable-archs=arm64ec`, so a fresh `wineboot --init` on
+  the runner would emit aarch64 builtins, not the x86-64 ones now shipped.
+  Regeneration is therefore a change, not a rebuild, and would need review.
+- **Fixed cheaply in this session:** `tools/check-prefix-template.sh` is now a
+  step in the `host-checks` workflow job, so the `ml719` guard runs on every
+  dispatch instead of being decorative. It passes on the shipped archive
+  (`check-prefix-template: OK -- no absolute host symlinks`, exit 0, verified
+  locally). The regex and its behaviour on a symlinked archive are UNVERIFIED
+  beyond that pass.
 - **Mitigating:** the archive is tracked, so it does ship. The risk is
   reproducibility and silent divergence, not a missing file.
 - **Next path:** decide whether regeneration belongs in CI. `build-prefix-snapshot.sh`
