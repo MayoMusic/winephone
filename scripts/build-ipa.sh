@@ -145,10 +145,19 @@ run_stage dxmt-ios bash "$ROOT/build/dxmt-ios/build.sh"
 export PATH="$ROOT/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin:$PATH"
 if [[ ! -e "$ROOT/dxmt/toolchains" ]]; then ln -s ../toolchains "$ROOT/dxmt/toolchains"; fi
 if [[ ! -f "$ROOT/dxmt/build-arm64ec/build.ninja" ]]; then
+  # meson setup takes [builddir] [sourcedir]. Passing only the build dir leaves
+  # meson to take the source directory from the current directory, which is the
+  # repository root and has no meson.build, so it reported:
+  #   Neither directory '<ROOT>/dxmt/build-arm64ec' nor directory None
+  #   contain a build file meson.build.
+  # The dxmt source root is dxmt/ itself (its meson.build carries
+  # project('dxmt', ...)). Pass both, the way Madeira's own recipe does:
+  #   meson setup dxmt/build-arm64ec dxmt ...
   run_stage dxmt-pe-configure env SDKROOT="$(xcrun --sdk macosx --show-sdk-path)" meson setup \
     --cross-file "$ROOT/dxmt/build-aarch64-win.txt" \
     --native-file "$ROOT/dxmt/build-osx.txt" \
-    -Dwine_build_path=../../wine/build-macos "$ROOT/dxmt/build-arm64ec"
+    -Dwine_build_path=../../wine/build-macos \
+    "$ROOT/dxmt/build-arm64ec" "$ROOT/dxmt"
 fi
 run_stage dxmt-pe-build env SDKROOT="$(xcrun --sdk macosx --show-sdk-path)" meson compile -C "$ROOT/dxmt/build-arm64ec"
 for pair in "d3d11/d3d11.dll:d3d11.dll" "dxgi/dxgi.dll:dxgi.dll" \
