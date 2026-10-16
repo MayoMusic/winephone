@@ -50,21 +50,30 @@ echo "=== winecrt0 (winemetal/meson.build:18-20) ==="
 make -C "$B" -j"$JOBS" libs/winecrt0
 
 echo "=== dbghelp (winemetal/meson.build:24) ==="
-make -C "$B" -j"$JOBS" "dlls/dbghelp/$INSTALL_DIR/dbghelp.dll"
 # The import library is a separate make target from the DLL and is not a
-# dependency of the DLL target, so the link above can succeed and still leave no
-# libdbghelp.a -- which is exactly what run 38838887708 did: the DLL linked, the
-# verification then reported "MISSING dlls/dbghelp/arm64ec-windows/libdbghelp.a",
-# and no linker error appears anywhere in the log because there was no link
-# failure. Build the import library explicitly as well.
-make -C "$B" -j"$JOBS" "dlls/dbghelp/libdbghelp.a"
+# prerequisite of it, so building only the DLL file target links fine and still
+# leaves no libdbghelp.a - which is what run 38838887708 did.
+#
+# Do not guess the archive's target name. Wine 11 generates its makefiles with
+# tools/makedep (configure.ac:2435, "creating Makefile rules..."), so there is
+# no template to read a target name from: "dlls/dbghelp/libdbghelp.a" is not a
+# rule and run 38840357642 failed with "No rule to make target". The module
+# *directory* target is known to exist - docs/BUILDING.md and
+# build/wine-pe/build-modules.sh both use "make -C dlls/<name>" - so build that
+# to let Wine produce the import library itself.
+make -C "$B" -j"$JOBS" "dlls/dbghelp/$INSTALL_DIR/dbghelp.dll"
+if [ ! -f "$B/dlls/dbghelp/$INSTALL_DIR/libdbghelp.a" ]; then
+    make -C "$B" -j"$JOBS" dlls/dbghelp
+fi
 # winemetal/meson.build:24 searches only
-# join_paths(wine_build_path, 'dlls/dbghelp', windows_builtin_install_dir), so if
-# the rule put the archive one level up, put a copy where meson will look rather
-# than changing dxmt.
-if [ ! -f "$B/dlls/dbghelp/$INSTALL_DIR/libdbghelp.a" ] && [ -f "$B/dlls/dbghelp/libdbghelp.a" ]; then
-    cp "$B/dlls/dbghelp/libdbghelp.a" "$B/dlls/dbghelp/$INSTALL_DIR/libdbghelp.a"
-    echo "  placed libdbghelp.a into $INSTALL_DIR so winemetal/meson.build can find it"
+# join_paths(wine_build_path, 'dlls/dbghelp', windows_builtin_install_dir), so
+# put the archive where meson will look rather than changing dxmt.
+if [ ! -f "$B/dlls/dbghelp/$INSTALL_DIR/libdbghelp.a" ]; then
+    cand=$(find "$B/dlls/dbghelp" -maxdepth 2 -name 'libdbghelp.a' | head -n 1)
+    if [ -n "$cand" ]; then
+        cp "$cand" "$B/dlls/dbghelp/$INSTALL_DIR/libdbghelp.a"
+        echo "  placed libdbghelp.a from $cand into $INSTALL_DIR"
+    fi
 fi
 
 echo "=== resolving what winemetal/meson.build will look for ==="
