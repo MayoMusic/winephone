@@ -1254,6 +1254,9 @@ struct ContentView: View {
     /// Play without JIT: the start that waits for Enable JIT (jitReadyForLaunch).
     @State private var launchAfterJIT: (() -> Void)?
     @State private var entitlements: EntitlementStatus?
+    /// Resolved from the kernel, the embedded profile and the measured address
+    /// map, so a badge is green only when a capability demonstrably works.
+    @State private var memoryReport: MemoryCapabilityReport?
     @State private var debuggerAttached = isDebuggerAttached()
     @ObservedObject private var input = InputSettings.shared
     @State private var pointerPanel = false
@@ -1346,6 +1349,7 @@ struct ContentView: View {
             .onAppear {
                 jit_install_trap_handler()
                 entitlements = EntitlementStatus.check()
+                memoryReport = MemoryCapabilityReport.evaluate()
                 logEntitlementStatus()
                 logStore.log("[build] \(BuildStamp.text)")
                 DeviceDiagnostics.logStartup()
@@ -1611,8 +1615,8 @@ struct ContentView: View {
             // Live debugger/JIT state, not the (macOS-only, never granted on
             // iOS) allow-jit entitlement the old badge checked.
             entitlementBadge("JIT", granted: debuggerAttached)
-            entitlementBadge("Memory+", granted: ents.increasedMemory)
-            entitlementBadge("64-bit VA", granted: ents.extendedVA)
+            capabilityBadge(memoryReport?.increasedMemory)
+            capabilityBadge(memoryReport?.extendedVA)
             Spacer()
             // Device model rides in this row (the old standalone statusHeader
             // row above it spent ~50pt of vertical space on nothing else).
@@ -1658,16 +1662,54 @@ struct ContentView: View {
         )
     }
 
+    /// Three states, not two. A key that is in the binary but that the
+    /// provisioning profile does not authorise does nothing, and showing it as
+    /// a green tick would tell the user a capability is available when it is
+    /// not. Amber is that case; red is "not requested at all".
+    private func capabilityBadge(_ capability: MemoryCapability?) -> some View {
+        let state = capability?.state ?? .absent
+        let on = capability?.isGreen ?? false
+        let tint: Color = on ? .green : (state == .presentButNotAuthorised ? .orange : .red)
+        let symbol: String
+        switch state {
+        case .working: symbol = on ? "checkmark.circle.fill" : "exclamationmark.circle"
+        case .presentButNotAuthorised: symbol = "exclamationmark.triangle.fill"
+        case .absent: symbol = "xmark.circle"
+        }
+        return HStack(spacing: 4) {
+            Image(systemName: symbol)
+                .foregroundColor(tint)
+                .font(.caption2)
+            Text(capability?.title ?? "?")
+                .font(.caption2)
+                .foregroundColor(on ? .primary : .secondary)
+            if !on, let capability {
+                Text(state == .presentButNotAuthorised ? "signed, not granted" : "missing")
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundColor(tint)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(RoundedRectangle(cornerRadius: 6).fill(tint.opacity(0.1)))
+    }
+
     private func logEntitlementStatus() {
         guard let ents = entitlements else { return }
         logStore.log("Checking entitlements...")
         logStore.log("  allow-jit: \(ents.jitAllowed)", level: ents.jitAllowed ? .success : .error)
-        logStore.log("  increased-memory-limit: \(ents.increasedMemory)", level: ents.increasedMemory ? .success : .debug)
-        logStore.log("  extended-virtual-addressing: \(ents.extendedVA)", level: ents.extendedVA ? .success : .debug)
-        // The memory limit is the entitlement a session needs; the address map may
-        // be the standard 63 GB one.
-        if !ents.increasedMemory {
-            logStore.log("  Tip: Use GetMoreRam to add increased-memory-limit", level: .info)
+        if let report = memoryReport {
+            // The measured address map, so the log says what the process
+            // actually got rather than what it asked for.
+            logStore.log(report.logLine, level: report.extendedVA.isGreen ? .success : .debug)
+            for capability in [report.increasedMemory, report.extendedVA] {
+                if capability.isGreen { continue }
+                logStore.log("  \(capability.title) (\(capability.key)) is not active.", level: .error)
+                logStore.log("    \(capability.remediation)", level: .info)
+            }
+        } else {
+            logStore.log("  increased-memory-limit: \(ents.increasedMemory)", level: ents.increasedMemory ? .success : .debug)
+            logStore.log("  extended-virtual-addressing: \(ents.extendedVA)", level: ents.extendedVA ? .success : .debug)
         }
     }
 
@@ -3673,21 +3715,31 @@ struct SetupGuideView: View {
                     guideRow(
                         icon: "memorychip",
                         title: "Increased Memory Limit",
-                        detail: "Raises the Jetsam memory threshold. Included in the app entitlements. If not detected, use GetMoreRam to inject it."
+                        detail: "Raises the physical RAM ceiling (the Jetsam threshold). Apple: \"may perform better by exceeding the default app memory limit\". Requested by this build. It does NOT enlarge address space, so it cannot fix a failure to reserve a large contiguous block. Needs a paid Apple Developer Program team holding the capability; a free Apple Account cannot."
                     )
                     guideRow(
                         icon: "arrow.up.left.and.arrow.down.right",
                         title: "Extended Virtual Addressing",
-                        detail: "Expands virtual address space to ~64GB. Required for large games. Must be injected via GetMoreRam (free accounts can't provision this)."
+                        detail: "Expands virtual address space. Apple: \"needs that require a larger addressable space ... games that memory map assets to stream to the GPU may benefit\". This is the entitlement a \"unable to reserve N MB of address space\" failure actually needs. Requires a paid Apple Developer Program team with the capability enabled on the App ID, then a rebuild signed by that team."
                     )
+                }
+
+                Section("Why a sideloading tool cannot grant these") {
+                    Text("Re-signing tools such as SideStore, AltStore, and GetMoreRam sign with your own team. They can put a key into a signature, but they cannot make Apple authorise a capability your team does not hold, and they cannot enlarge an address map that the kernel did not grant. A capability has to be enabled on the App ID in the Developer Portal first, which needs a paid membership.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text("The Memory+ and 64-bit VA badges above are resolved from what the kernel reports, what the embedded profile authorises, and the address map this process actually received. A key present in the binary is never on its own enough to turn a badge green.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
 
                 Section("Setup Steps") {
                     stepRow(number: 1, text: "Install Madeira via SideStore or Xcode")
-                    stepRow(number: 2, text: "Install GetMoreRam and run it to inject memory entitlements into your App ID")
-                    stepRow(number: 3, text: "Reinstall Madeira with the same IPA to apply injected entitlements")
-                    stepRow(number: 4, text: "In StikDebug, assign the 'universal' JIT script to Madeira and launch it")
-                    stepRow(number: 5, text: "Launch Madeira and tap 'Test JIT' to verify")
+                    stepRow(number: 2, text: "If you have a paid Apple Developer Program team, enable Extended Virtual Addressing on the App ID in the Developer Portal; a free Apple Account cannot hold it")
+                    stepRow(number: 3, text: "Produce a profile that carries the capability, then run scripts/prepare-entitlements.py against it to regenerate Madeira.entitlements with exactly the keys that profile authorises")
+                    stepRow(number: 4, text: "Reinstall Madeira with the same IPA so the new signature takes effect")
+                    stepRow(number: 5, text: "In StikDebug, assign the 'universal' JIT script to Madeira and launch it")
+                    stepRow(number: 6, text: "Launch Madeira: the 64-bit VA badge turns green only once the measured address map is larger than 63GB")
                 }
 
                 Section("About") {

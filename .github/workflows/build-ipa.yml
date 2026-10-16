@@ -397,6 +397,8 @@ jobs:
         run: python3 tests/host/check-power-probe.py
       - name: Check preload-dlls
         run: python3 tests/host/check-preload-dlls.py
+      - name: Check prepare-entitlements
+        run: python3 tests/host/check-prepare-entitlements.py
       - name: Check pso-lazy-libs
         run: python3 tests/host/check-pso-lazy-libs.py
       - name: Check quiet-log

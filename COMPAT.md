@@ -29,6 +29,29 @@ second is a large-address-space request and collides with the limits of a free
 Apple ID (`com.apple.developer.kernel.extended-virtual-addressing` is not
 available there); treat it as the top memory risk before any AAA attempt.
 
+### ROTTR: the 3072 MB address-space reservation, traced
+
+Observed on device: `CDC: Unable to reserve 3072MB of address space.`, then
+`ExitProcess`. Traced to a single instruction in the CDC allocator, at RVA
+`0x3C3717` (file offset `0x3C2D17`) in a 341-byte function at RVA `0x3C3690`:
+
+```asm
+mov  edx, 0xC0000000     ; 3072 MB, a compile-time immediate
+mov  r8d, 0x2000          ; MEM_RESERVE
+lea  r9d, [rcx+4]         ; PAGE_READWRITE
+call [rip+...]            ; VirtualAlloc  -> NULL
+test rax, rax
+jne  ok                   ; no retry, no smaller fallback anywhere
+```
+
+The 3072 is not derived from system memory and is not configurable; the failure
+text prints `0xC0000000 >> 20`. Of the 15 `VirtualAlloc` call sites in the
+binary this is the only one with a hard-coded size of 32 MB or more - the other
+14 take their size from a register. Because `MEM_RESERVE` commits nothing, the
+reservation is an address-space problem, not a RAM problem: see
+`docs/MEMORY_ENTITLEMENTS.md`. `tools/rotrr-heap-patch.py` lowers the constant.
+**Not yet tested on a device.**
+
 Rise of the Tomb Raider ships its own `msvcp140.dll`, `vcruntime140.dll` and
 `vcruntime140_1.dll`, so it needs no user-supplied Microsoft redistributable.
 CONTROL Resonant does not ship them and would rely on Wine's own LGPL builtins.
