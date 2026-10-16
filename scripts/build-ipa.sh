@@ -165,10 +165,26 @@ if [[ ! -f "$ROOT/dxmt/build-arm64ec/build.ninja" ]]; then
   # searched a directory the ARM64EC Wine tree never populates and reported
   # "library 'winecrt0' not found". wine_build_path must likewise be the
   # ARM64EC tree. This is Madeira's exact recipe from docs/BUILDING.md.
+  # wine_build_path is resolved by dxmt/src/winemetal/meson.build:15-17 as
+  # join_paths(meson.project_source_root(), wine_build_path), and
+  # project_source_root() is <repo>/dxmt - confirmed because build-ipa.sh above
+  # creates the toolchains symlink at <repo>/dxmt/toolchains, which is the path
+  # meson.build:49 resolves the same way.
+  #
+  # So "..", not "../..": from <repo>/dxmt, "../.." lands on the PARENT of the
+  # repository (/Users/runner/work/winephone), one level above the Wine tree.
+  # That is why run 38847751266 still reported "C static library 'winecrt0' not
+  # found" after static: true took effect - meson was searching a directory
+  # outside the checkout while the archive sat, verified at 160440 bytes, at
+  # <repo>/wine/build-arm64ec/libs/winecrt0/arm64ec-windows/libwinecrt0.a.
+  #
+  # docs/BUILDING.md at the base commit documents "../../wine/build-arm64ec",
+  # which is only correct if resolved from the build directory
+  # dxmt/build-arm64ec rather than the source root. Follow the code, not the doc.
   run_stage dxmt-pe-configure env SDKROOT="$(xcrun --sdk macosx --show-sdk-path)" meson setup \
     --cross-file "$ROOT/dxmt/build-arm64ec-win.txt" \
     --native-file "$ROOT/dxmt/build-osx.txt" \
-    -Dwine_build_path=../../wine/build-arm64ec \
+    -Dwine_build_path=../wine/build-arm64ec \
     "$ROOT/dxmt/build-arm64ec" "$ROOT/dxmt"
 fi
 run_stage dxmt-pe-build env SDKROOT="$(xcrun --sdk macosx --show-sdk-path)" meson compile -C "$ROOT/dxmt/build-arm64ec"
