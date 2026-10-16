@@ -139,6 +139,7 @@ run_stage wine-ntdll-unix bash "$ROOT/build/ntdll-unix/build.sh"
 run_stage wineserver bash "$ROOT/build/wineserver/build.sh"
 run_stage win32u-unix bash "$ROOT/build/win32u-unix/build.sh"
 run_stage wine-pe-ntdll bash "$ROOT/build/wine-pe/build-ntdll.sh"
+run_stage wine-pe-dxmt-prereqs bash "$ROOT/build/wine-pe/build-dxmt-prereqs.sh"
 run_stage wine-pe-modules bash "$ROOT/build/wine-pe/build-modules.sh"
 run_stage dxmt-ios bash "$ROOT/build/dxmt-ios/build.sh"
 
@@ -153,10 +154,21 @@ if [[ ! -f "$ROOT/dxmt/build-arm64ec/build.ninja" ]]; then
   # The dxmt source root is dxmt/ itself (its meson.build carries
   # project('dxmt', ...)). Pass both, the way Madeira's own recipe does:
   #   meson setup dxmt/build-arm64ec dxmt ...
+  #
+  # The cross file must be the ARM64EC one, not build-aarch64-win.txt.
+  # dxmt/meson.build:32-38 decides is_arm64ec by compiling "#error not arm64ec"
+  # unless __arm64ec__/_M_ARM64EC is defined, and only
+  # arm64ec-w64-mingw32-clang defines them. With the aarch64 compiler that check
+  # fails - which is the literal "error: not arm64ec" in the log - and
+  # meson.build:247-260 then sets windows_builtin_install_dir to
+  # 'aarch64-windows' instead of 'arm64ec-windows', so winemetal/meson.build
+  # searched a directory the ARM64EC Wine tree never populates and reported
+  # "library 'winecrt0' not found". wine_build_path must likewise be the
+  # ARM64EC tree. This is Madeira's exact recipe from docs/BUILDING.md.
   run_stage dxmt-pe-configure env SDKROOT="$(xcrun --sdk macosx --show-sdk-path)" meson setup \
-    --cross-file "$ROOT/dxmt/build-aarch64-win.txt" \
+    --cross-file "$ROOT/dxmt/build-arm64ec-win.txt" \
     --native-file "$ROOT/dxmt/build-osx.txt" \
-    -Dwine_build_path=../../wine/build-macos \
+    -Dwine_build_path=../../wine/build-arm64ec \
     "$ROOT/dxmt/build-arm64ec" "$ROOT/dxmt"
 fi
 run_stage dxmt-pe-build env SDKROOT="$(xcrun --sdk macosx --show-sdk-path)" meson compile -C "$ROOT/dxmt/build-arm64ec"
