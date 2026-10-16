@@ -65,6 +65,23 @@ make -C "$B" -j"$JOBS" "dlls/dbghelp/$INSTALL_DIR/dbghelp.dll"
 if [ ! -f "$B/dlls/dbghelp/$INSTALL_DIR/libdbghelp.a" ]; then
     make -C "$B" -j"$JOBS" dlls/dbghelp
 fi
+# Still absent after the directory target too (run 38841949430). The reason is
+# Wine's, not ours: a PE module's import library is only built when some other
+# module links against it. libntdll.a exists because every module links ntdll;
+# nothing links dbghelp, so its archive is never produced - which is why the
+# directory target did not create it either.
+#
+# So ask winebuild for it directly. tools/winebuild/main.c:233 has
+# LONG_OPT_IMPLIB, and wine/dlls/dbghelp/dbghelp.spec is the export list, so this
+# is the same tool and the same spec the build would have used - it just does not
+# depend on a generated make target name, which makedep does not expose.
+WB="$B/tools/winebuild/winebuild"
+SPEC="$B/dlls/dbghelp/dbghelp.spec"
+if [ ! -f "$B/dlls/dbghelp/$INSTALL_DIR/libdbghelp.a" ] && [ -x "$WB" ] && [ -f "$SPEC" ]; then
+    "$WB" --dll-name dbghelp --implib \
+        -o "$B/dlls/dbghelp/$INSTALL_DIR/libdbghelp.a" "$SPEC"
+    echo "  winebuild --implib wrote libdbghelp.a"
+fi
 # winemetal/meson.build:24 searches only
 # join_paths(wine_build_path, 'dlls/dbghelp', windows_builtin_install_dir), so
 # put the archive where meson will look rather than changing dxmt.
