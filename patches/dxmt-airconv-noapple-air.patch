@@ -1,0 +1,62 @@
+diff --git a/src/airconv/airconv_context.cpp b/src/airconv/airconv_context.cpp
+index 69dfc77..d19da9b 100644
+--- a/src/airconv/airconv_context.cpp
++++ b/src/airconv/airconv_context.cpp
+@@ -26,9 +26,29 @@
+ 
+ #include "airconv_context.hpp"
+ 
++#ifdef WINEPHONE_NO_APPLE_AIR
++/* WinePhone: build without Apple's licensed Metal Shader Converter headers.
++ *
++ * air_msad.h, air_samplepos.h and air_tessellation.h declare three precompiled
++ * AIR intrinsic bitcode blobs shipped in Apple's converter package. Those
++ * headers are not in this repository and must not be added: the package is
++ * licence-bound, WinePhone's release deliberately omits the converter, and
++ * scripts/build-ipa.sh rejects any IPA containing it.
++ *
++ * They are used for nothing else in this file. initializeModule() - the part
++ * that stamps the AIR target triple and the air.* module flags that every
++ * converted shader needs - does not touch them, so the whole DXBC->AIR path
++ * still builds. What is lost is the three optional intrinsic libraries:
++ * multisample-anisotropic depth (MSAD), sample positions, and tessellation.
++ * A shader that needs one of those intrinsics will fail in the Metal compiler
++ * instead of at build time, which is a runtime shader failure rather than a
++ * missing file. See BLOCKERS.md B-016. */
++static const bool winephone_air_blobs_unavailable = true;
++#else
+ #include "air_msad.h"
+ #include "air_samplepos.h"
+ #include "air_tessellation.h"
++#endif
+ 
+ #include "transforms/lower_16bit_texread.hpp"
+ 
+@@ -183,6 +203,19 @@ void linkShader(llvm::Module &M, const unsigned char (&bitcode)[N]) {
+   llvm::Linker::linkModules(M, std::move(module), Linker::LinkOnlyNeeded);
+ };
+ 
++#ifdef WINEPHONE_NO_APPLE_AIR
++/* See the WINEPHONE_NO_APPLE_AIR block above. linkShader() is deliberately
++ * left unused here rather than handed a dummy blob: it is a template on the
++ * blob's array size and would try to parse the dummy as bitcode. */
++void
++linkMSAD(llvm::Module &M) { (void)M; }
++
++void
++linkSamplePos(llvm::Module &M) { (void)M; }
++
++void
++linkTessellation(llvm::Module &M) { (void)M; }
++#else
+ void
+ linkMSAD(llvm::Module &M) {
+   linkShader(M, air_msad);
+@@ -197,5 +230,6 @@ void
+ linkTessellation(llvm::Module &M) {
+   linkShader(M, air_tessellation);
+ }
++#endif
+ 
+ } // namespace dxmt
+\ No newline at end of file

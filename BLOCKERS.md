@@ -285,3 +285,52 @@
   archive after the validator passes, the resolution base is `app/` and the
   correct repair is to make those file references explicit (or copy alongside,
   as the older entries imply) — the log will name the path.
+
+## B-016: DXMT's airconv needs Apple's licensed AIR headers, which this tree must not ship
+
+- **Evidence:** run `38832880011` reached `dxmt-ios` and failed on **one unit of
+  83** - `Results: 82 succeeded, 1 failed / Failed: airconv_context` - with
+  `dxmt/src/airconv/airconv_context.cpp:29:10: fatal error: 'air_msad.h' file
+  not found`. That text is only visible because the preceding change routed
+  failing units through `report_failure()`; before it the log said nothing more
+  than the unit's name. A tree-wide search finds **no** `air_*.h` anywhere in
+  WinePhone: the headers are genuinely absent, not merely off the include path.
+- **What the headers are.** `airconv_context.cpp` includes exactly three of
+  them - `air_msad.h`, `air_samplepos.h`, `air_tessellation.h` - and uses them
+  for nothing else. They declare three precompiled AIR intrinsic bitcode blobs
+  (`air_msad`, `air_samplepos`, `air_tessellation`) consumed only at
+  `:188/:193/:198`. `initializeModule()` at `:39`, which stamps the
+  `air64-apple-macosx14.0.0` target triple and the `air.*` module flags that
+  every converted shader needs, does not touch them, and `airconv_public.h`
+  does not leak the blobs. So **the DXBC->AIR path that D3D11 depends on is
+  complete without them**; they carry three optional intrinsic libraries.
+- **Why they are absent on purpose.** They ship only inside Apple's Metal
+  Shader Converter, which is licence-bound. Madeira pins the 30 MB installer in
+  `build/madeira-d3d12/deps.sh` and carries a "Madeira Converter Exception"
+  (`LICENSE-EXCEPTION.md`, `Adopted on: 2026-09-24`) whose entire purpose is to
+  let GPL code use it. WinePhone's own recorded policy is stricter: it omits the
+  D3D12 conversion path pending licensing review, and `scripts/build-ipa.sh:139`
+  fails any build whose IPA contains `libmetaliconverter`, `d3d12core.dll` or
+  `madeira_d3d12`. Rule 2 and rule 8 hold: the converter is never used or
+  redistributed here.
+- **Fix applied.** `patches/dxmt-airconv-noapple-air.patch`, applied by
+  `build/dxmt-ios/build.sh` in the same idempotent form `build/fex-ios/build.sh`
+  uses, with `-DWINEPHONE_NO_APPLE_AIR`. The patch compiles out the three
+  includes and replaces the three `linkShader(M, <blob>)` bodies with no-ops; it
+  deliberately does **not** hand `linkShader` a dummy blob, because that is
+  templated on the blob's array size and would try to parse the dummy as
+  bitcode.
+- **Cost, stated plainly.** MSAD (multisample anisotropic depth), sample
+  positions and tessellation (Hull/Domain) intrinsics are no longer linked. A
+  shader that uses one will fail in the Metal compiler at run time instead of at
+  build time. That is a real compatibility limit, not a silent success, and any
+  title relying on tessellation is expected to need the licensed converter.
+- **Decision still open for the user.** The alternative is to accept Apple's
+  converter under Madeira's already-adopted exception and gain full MSAD /
+  sample-position / tessellation support, at the cost of shipping licence-bound
+  material and reversing the current `build-ipa.sh` prohibition. This session
+  did not take that route; the stub keeps the build moving and keeps the tree
+  clean of licensed binaries.
+- **Status:** fix written; the patched unit compiling, and the D3D11 path
+  working without MSAD/sample-position/tessellation, are **UNVERIFIED** until a
+  run completes `dxmt-ios` and links the app.

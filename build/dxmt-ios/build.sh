@@ -23,6 +23,13 @@ INCLUDES_DIRECTX="-I$DXMT_ROOT/include/native/directx -I$DXMT_ROOT/include/nativ
 INCLUDES_SHADERS="-I$BUILD_DIR/shader-headers"
 LLVM_INCLUDES="-I$LLVM_BUILD/include -I$LLVM_SRC/include"
 AIRCONV_DEFS="-D_FILE_OFFSET_BITS=64 -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS"
+# WinePhone builds airconv without Apple's licensed Metal Shader Converter
+# headers. air_msad.h / air_samplepos.h / air_tessellation.h ship only in that
+# package; the package is licence-bound, this tree deliberately omits the
+# converter, and scripts/build-ipa.sh rejects an IPA containing it. The patch
+# keeps the whole DXBC->AIR path and stubs three optional intrinsic libraries
+# (MSAD, sample positions, tessellation) - see BLOCKERS.md B-016.
+AIRCONV_DEFS="$AIRCONV_DEFS -DWINEPHONE_NO_APPLE_AIR"
 CXX_FLAGS="-std=c++20 -fno-exceptions -fno-rtti"
 
 # MADEIRA (WOW64_DESIGN.md section 8, `dxmt_madeira_native`): the D3D9
@@ -144,6 +151,13 @@ compile_objc "$DXMT_SRC/winemetal/unix/winemetal_unix.c" winemetal_unix
 compile_objc "$DXMT_SRC/winemetal/unix/cache.c"          cache
 
 echo "=== airconv (C++ 20, needs LLVM headers) ==="
+# Keep iOS adaptations as a reviewable WinePhone patch, not edits to the dxmt
+# submodule. Same idempotent form as build/fex-ios/build.sh.
+AIRCONV_PATCH="$REPO_ROOT/patches/dxmt-airconv-noapple-air.patch"
+if ! git -C "$DXMT_ROOT" apply --reverse --check "$AIRCONV_PATCH" >/dev/null 2>&1; then
+    git -C "$DXMT_ROOT" apply --check "$AIRCONV_PATCH"
+    git -C "$DXMT_ROOT" apply "$AIRCONV_PATCH"
+fi
 for cpp in airconv_context.cpp air_type.cpp air_signature.cpp air_operations.cpp \
            dxbc_converter.cpp dxbc_converter_gs.cpp dxbc_converter_ts.cpp \
            dxbc_converter_basicblock.cpp dxbc_converter_cfg.cpp \
