@@ -51,6 +51,21 @@ make -C "$B" -j"$JOBS" libs/winecrt0
 
 echo "=== dbghelp (winemetal/meson.build:24) ==="
 make -C "$B" -j"$JOBS" "dlls/dbghelp/$INSTALL_DIR/dbghelp.dll"
+# The import library is a separate make target from the DLL and is not a
+# dependency of the DLL target, so the link above can succeed and still leave no
+# libdbghelp.a -- which is exactly what run 38838887708 did: the DLL linked, the
+# verification then reported "MISSING dlls/dbghelp/arm64ec-windows/libdbghelp.a",
+# and no linker error appears anywhere in the log because there was no link
+# failure. Build the import library explicitly as well.
+make -C "$B" -j"$JOBS" "dlls/dbghelp/libdbghelp.a"
+# winemetal/meson.build:24 searches only
+# join_paths(wine_build_path, 'dlls/dbghelp', windows_builtin_install_dir), so if
+# the rule put the archive one level up, put a copy where meson will look rather
+# than changing dxmt.
+if [ ! -f "$B/dlls/dbghelp/$INSTALL_DIR/libdbghelp.a" ] && [ -f "$B/dlls/dbghelp/libdbghelp.a" ]; then
+    cp "$B/dlls/dbghelp/libdbghelp.a" "$B/dlls/dbghelp/$INSTALL_DIR/libdbghelp.a"
+    echo "  placed libdbghelp.a into $INSTALL_DIR so winemetal/meson.build can find it"
+fi
 
 echo "=== resolving what winemetal/meson.build will look for ==="
 missing=0
