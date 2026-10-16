@@ -28377,6 +28377,7 @@ NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR z
          *
          * Uncapped for the first 64 failures, then every 64th: a single failure
          * is the interesting one, and a storm should not hide it. */
+        ios_map_note_alloc( st == STATUS_SUCCESS );   /* ml1216: see [map-rate] */
         if (st != STATUS_SUCCESS)
         {
             static unsigned long af_n;
@@ -28479,6 +28480,11 @@ NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR z
     return allocate_virtual_memory( ret, size_ptr, type, protect, 0, limit, 0, 0 );
 #endif
 }
+
+
+/* ml1216: forward declaration -- the first use is above, the definition sits
+ * with the [map-fail] block next to NtMapViewOfSection. */
+static void ios_map_note_alloc( int ok );
 
 
 static NTSTATUS get_extended_params( const MEM_EXTENDED_PARAMETER *parameters, ULONG count,
@@ -29815,6 +29821,33 @@ retry_code_carve_reuse:
                          hit == (unsigned)-1 ? ios_steer_n : hit,
                          hit == (unsigned)-1 ? 0 : ios_steer[hit].freed, ios_steer_n );
             }
+        }
+        /* ml1217: the Ex entry had NO failure line at all -- [alloc-fail] ml814
+         * sits only in NtAllocateVirtualMemory -- and ml310's own comment above
+         * says FEX's ARM64EC AllocatorHooks calls ::VirtualAlloc2, i.e. THIS
+         * function. So "zero [alloc-fail]" was never a measurement of both guest
+         * allocation entry points. Named [alloc-fail-ex] rather than reusing
+         * [alloc-fail] so a grep of the earlier logs keeps its old, narrower
+         * meaning instead of silently changing under the reader. */
+        ios_map_note_alloc( st == STATUS_SUCCESS );
+        if (st != STATUS_SUCCESS)
+        {
+            static unsigned long aex_n;
+            unsigned long i2 = ++aex_n;
+            if (i2 <= 64 || (i2 % 64) == 0)
+                dprintf( 2, "[alloc-fail-ex] ml1217 #%lu NtAllocateVirtualMemoryEx status=%08x "
+                            "ret=%p size=0x%llx type=0x%x protect=0x%x attrs=0x%x "
+                            "limit=[0x%llx,0x%llx] align=0x%llx machine=0x%x "
+                            "| footprint=%llu MB | swap refused=%llu disk=%llu of %llu MB | tid=%04x\n",
+                         i2, (unsigned)st, ret ? *ret : NULL,
+                         (unsigned long long)(size_ptr ? *size_ptr : 0), (unsigned)type,
+                         (unsigned)protect, (unsigned)attributes,
+                         (unsigned long long)limit_low, (unsigned long long)limit_high,
+                         (unsigned long long)align, (unsigned)machine,
+                         ios_swap_footprint_mb(), ios_swap_refused,
+                         (unsigned long long)(ios_swap_disk_used() >> 20),
+                         (unsigned long long)(ios_swap_cap >> 20),
+                         NtCurrentTeb() ? (unsigned)(ULONG_PTR)NtCurrentTeb()->ClientId.UniqueThread : 0 );
         }
         return st;
     }
@@ -31907,6 +31940,127 @@ NTSTATUS WINAPI NtUnlockVirtualMemory( HANDLE process, PVOID *addr, SIZE_T *size
 
 
 /***********************************************************************
+ *  ml1216: [map-fail] / [map-rate] -- THE OTHER WAY A GUEST HEAP ASKS.
+ *
+ *  ROTTR.exe on iPhone18,3 / iOS 27.0.1 (cores=2, pool=512, vram-mb=2048)
+ *  reaches the main menu at 60 fps and then, on the first level load,
+ *  dies in its OWN allocator:
+ *
+ *    [ASSERT] Fatal error: ERROR: Out of memory, "UNKNOWN" requested
+ *             112460 bytes (1010343740 total free = 963.5 MB)
+ *
+ *  963 MB free beside a 112 KB request is not a full pool, and
+ *  [alloc-fail] ml814 printed ZERO times across three logs, so that
+ *  syscall never failed. A guest heap reaches the kernel through two
+ *  ntdll entry points and this is the second: both NtMapViewOfSection
+ *  and NtMapViewOfSectionEx ended in a bare
+ *
+ *      return virtual_map_section( ... );
+ *
+ *  with no log on any failing return, so a refused mapping (what a
+ *  streaming allocator asks for: CreateFileMapping + MapViewOfFile)
+ *  left no trace at all. ml1217 puts the same line on
+ *  NtAllocateVirtualMemoryEx, which never had one either -- ml814's
+ *  covers only the non-Ex entry, and ml310's own comment above already
+ *  says FEX uses the Ex one. So "zero [alloc-fail]" proved less than it
+ *  looked: it was never a measurement of both entry points.
+ *
+ *  The swap tier does NOT decide here. ios_swap_commit and
+ *  ios_swap_reserve are reached only from the virtual-memory exits and
+ *  virtual_map_section calls neither, so the decision is not-applicable
+ *  BY CONSTRUCTION rather than by observation. The tier's counters are
+ *  printed anyway, so its state at the instant of failure is on the
+ *  record rather than inferred from a stats line a minute earlier.
+ *
+ *  [map-fail] needs no gate -- a refusal is rare, and the first 32
+ *  print in full. [map-rate] is a per-second heartbeat and is gated on
+ *  map-trace = 1, because it exists to answer exactly one question (did
+ *  the game STOP ASKING in the second before its assert, which would
+ *  put the failure wholly on the guest's side) and it can only answer it
+ *  while it is already running.
+ */
+static unsigned long long ios_alloc_ok, ios_alloc_bad;  /* both NtAllocateVirtualMemory* */
+static unsigned long long ios_map_ok, ios_map_bad;      /* NtMapViewOfSection + Ex */
+
+static int ios_map_trace_on( void )
+{
+    static int on = -1;
+
+    /* map-trace: 1 adds a one-second [map-rate] line counting the successful and
+     * failed NtAllocateVirtualMemory(Ex) and NtMapViewOfSection(Ex) calls, so a
+     * game that stops asking before its own allocator complains can be told from
+     * one the kernel stopped serving. Off by default; [map-fail] needs no gate. */
+    if (on < 0) on = madeira_cfg_int( "map-trace", 0 ) == 1;
+    return on;
+}
+
+static void ios_map_fail( const char *who, unsigned int status, HANDLE handle, HANDLE process,
+                          ULONG_PTR hint, ULONG_PTR zero_bits, SIZE_T size, SIZE_T commit_size,
+                          const LARGE_INTEGER *offset, ULONG alloc_type, ULONG protect )
+{
+    static unsigned long n;
+    unsigned long i = ++n;
+
+    /* Every failing return, including the guest's own parameter rejections:
+     * STATUS_INVALID_PARAMETER_* and STATUS_MAPPED_ALIGNMENT are self-evident
+     * from the status field, and hiding them would make an absent line
+     * ambiguous between "refused" and "never asked". */
+    if (i <= 32 || (i % 32) == 0)
+        dprintf( 2, "[map-fail] ml1216 #%lu %s status=%08x handle=%p process=%p hint=%p "
+                    "zero_bits=0x%llx size=0x%llx (%llu MB) commit=0x%llx off=0x%llx "
+                    "alloc_type=0x%x protect=0x%x | footprint=%llu MB "
+                    "| swap: not-applicable (virtual_map_section never calls ios_swap_commit) "
+                    "refused=%llu disk=%llu of %llu MB | tid=%04x\n",
+                 i, who, status, handle, process, hint, (unsigned long long)zero_bits,
+                 (unsigned long long)size, (unsigned long long)(size >> 20),
+                 (unsigned long long)commit_size,
+                 (unsigned long long)(offset ? offset->QuadPart : 0),
+                 (unsigned)alloc_type, (unsigned)protect, ios_swap_footprint_mb(),
+                 ios_swap_refused, (unsigned long long)(ios_swap_disk_used() >> 20),
+                 (unsigned long long)(ios_swap_cap >> 20),
+                 NtCurrentTeb() ? (unsigned)(ULONG_PTR)NtCurrentTeb()->ClientId.UniqueThread : 0 );
+}
+
+/* Counted at both entry points, read once a second. Relaxed atomics only:
+ * the counters are a diagnostic and must never serialise the allocator. */
+static void ios_map_rate( void );
+
+static void ios_map_note_alloc( int ok )
+{
+    __atomic_fetch_add( ok ? &ios_alloc_ok : &ios_alloc_bad, 1, __ATOMIC_RELAXED );
+    if (ios_map_trace_on()) ios_map_rate();
+}
+
+static void ios_map_note_map( int ok )
+{
+    __atomic_fetch_add( ok ? &ios_map_ok : &ios_map_bad, 1, __ATOMIC_RELAXED );
+    if (ios_map_trace_on()) ios_map_rate();
+}
+
+static void ios_map_rate( void )
+{
+    static unsigned long long t0;
+    struct timespec ts;
+    unsigned long long now;
+
+    clock_gettime( CLOCK_MONOTONIC, &ts );
+    now = (unsigned long long)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+    if (!t0) { t0 = now ? now : 1; return; }
+    if (now - t0 < 1000000000ull) return;
+
+    dprintf( 2, "[map-rate] ml1216 last %.2fs: alloc ok=%llu fail=%llu | map ok=%llu fail=%llu "
+                "| footprint=%llu MB\n",
+             (double)(now - t0) / 1e9,
+             __atomic_exchange_n( &ios_alloc_ok, 0, __ATOMIC_RELAXED ),
+             __atomic_exchange_n( &ios_alloc_bad, 0, __ATOMIC_RELAXED ),
+             __atomic_exchange_n( &ios_map_ok, 0, __ATOMIC_RELAXED ),
+             __atomic_exchange_n( &ios_map_bad, 0, __ATOMIC_RELAXED ),
+             ios_swap_footprint_mb() );
+    t0 = now;
+}
+
+
+/***********************************************************************
  *             NtMapViewOfSection   (NTDLL.@)
  *             ZwMapViewOfSection   (NTDLL.@)
  */
@@ -31917,6 +32071,10 @@ NTSTATUS WINAPI NtMapViewOfSection( HANDLE handle, HANDLE process, PVOID *addr_p
     unsigned int res;
     SIZE_T mask = granularity_mask;
     LARGE_INTEGER offset;
+    /* ml1216: the caller's own words, read before *addr_ptr/*size_ptr are
+     * rounded or rewritten below. virtual_map_section writes through them. */
+    const void *hint0 = *addr_ptr;
+    const SIZE_T size0 = *size_ptr;
 
     offset.QuadPart = offset_ptr ? offset_ptr->QuadPart : 0;
 
@@ -31925,31 +32083,55 @@ NTSTATUS WINAPI NtMapViewOfSection( HANDLE handle, HANDLE process, PVOID *addr_p
 
     /* Check parameters */
     if (zero_bits > 21 && zero_bits < 32)
+    {
+        ios_map_note_map( 0 );
+        ios_map_fail( "NtMapViewOfSection", STATUS_INVALID_PARAMETER_4, handle, process,
+                      hint0, zero_bits, size0, commit_size, offset_ptr, alloc_type, protect );
         return STATUS_INVALID_PARAMETER_4;
+    }
 
     /* If both addr_ptr and zero_bits are passed, they have match */
     if (zero_bits && zero_bits < 32 && ((UINT_PTR)*addr_ptr >> (32 - zero_bits)))
+    {
+        ios_map_note_map( 0 );
+        ios_map_fail( "NtMapViewOfSection", STATUS_INVALID_PARAMETER_4, handle, process,
+                      hint0, zero_bits, size0, commit_size, offset_ptr, alloc_type, protect );
         return STATUS_INVALID_PARAMETER_4;
+    }
     if (zero_bits >= 32 && ((UINT_PTR)*addr_ptr & ~zero_bits))
+    {
+        ios_map_note_map( 0 );
+        ios_map_fail( "NtMapViewOfSection", STATUS_INVALID_PARAMETER_4, handle, process,
+                      hint0, zero_bits, size0, commit_size, offset_ptr, alloc_type, protect );
         return STATUS_INVALID_PARAMETER_4;
+    }
 
     if (!is_win64 && !is_wow64())
     {
-        if (zero_bits >= 32) return STATUS_INVALID_PARAMETER_4;
+        if (zero_bits >= 32) { ios_map_note_map( 0 ); ios_map_fail( "NtMapViewOfSection", STATUS_INVALID_PARAMETER_4, handle, process, hint0, zero_bits, size0, commit_size, offset_ptr, alloc_type, protect ); return STATUS_INVALID_PARAMETER_4; }
         if (alloc_type & AT_ROUND_TO_PAGE)
         {
             *addr_ptr = ROUND_ADDR( *addr_ptr, page_mask );
             mask = page_mask;
         }
     }
-    else if (alloc_type & AT_ROUND_TO_PAGE) return STATUS_INVALID_PARAMETER_9;
+    else if (alloc_type & AT_ROUND_TO_PAGE)
+    {
+        ios_map_note_map( 0 );
+        ios_map_fail( "NtMapViewOfSection", STATUS_INVALID_PARAMETER_9, handle, process,
+                      hint0, zero_bits, size0, commit_size, offset_ptr, alloc_type, protect );
+        return STATUS_INVALID_PARAMETER_9;
+    }
 
     if (alloc_type & MEM_REPLACE_PLACEHOLDER) mask = page_mask;
-    if (offset.u.LowPart & mask) return STATUS_MAPPED_ALIGNMENT;
-    if ((UINT_PTR)*addr_ptr & mask) return STATUS_MAPPED_ALIGNMENT;
+    if (offset.u.LowPart & mask) { ios_map_note_map( 0 ); ios_map_fail( "NtMapViewOfSection", STATUS_MAPPED_ALIGNMENT, handle, process, hint0, zero_bits, size0, commit_size, offset_ptr, alloc_type, protect ); return STATUS_MAPPED_ALIGNMENT; }
+    if ((UINT_PTR)*addr_ptr & mask) { ios_map_note_map( 0 ); ios_map_fail( "NtMapViewOfSection", STATUS_MAPPED_ALIGNMENT, handle, process, hint0, zero_bits, size0, commit_size, offset_ptr, alloc_type, protect ); return STATUS_MAPPED_ALIGNMENT; }
     if ((UINT_PTR)*addr_ptr & host_page_mask)
     {
         ERR( "unaligned placeholder at %p\n", *addr_ptr );
+        ios_map_note_map( 0 );
+        ios_map_fail( "NtMapViewOfSection", STATUS_MAPPED_ALIGNMENT, handle, process,
+                      hint0, zero_bits, size0, commit_size, offset_ptr, alloc_type, protect );
         return STATUS_MAPPED_ALIGNMENT;
     }
 
@@ -31969,18 +32151,35 @@ NTSTATUS WINAPI NtMapViewOfSection( HANDLE handle, HANDLE process, PVOID *addr_p
         call.map_view.alloc_type   = alloc_type;
         call.map_view.prot         = protect;
         res = server_queue_process_apc( process, &call, &result );
-        if (res != STATUS_SUCCESS) return res;
+        if (res != STATUS_SUCCESS)
+        {
+            ios_map_note_map( 0 );
+            ios_map_fail( "NtMapViewOfSection/APC", res, handle, process, hint0, zero_bits,
+                          size0, commit_size, offset_ptr, alloc_type, protect );
+            return res;
+        }
 
         if (NT_SUCCESS(result.map_view.status))
         {
             *addr_ptr = wine_server_get_ptr( result.map_view.addr );
             *size_ptr = result.map_view.size;
         }
+        ios_map_note_map( NT_SUCCESS(result.map_view.status) );
+        if (!NT_SUCCESS(result.map_view.status))
+            ios_map_fail( "NtMapViewOfSection/APC", result.map_view.status, handle, process,
+                          hint0, zero_bits, size0, commit_size, offset_ptr, alloc_type, protect );
         return result.map_view.status;
     }
 
-    return virtual_map_section( handle, addr_ptr, 0, get_zero_bits_limit( zero_bits ), commit_size,
-                                offset_ptr, size_ptr, alloc_type, protect, 0 );
+    {
+        unsigned int st = virtual_map_section( handle, addr_ptr, 0, get_zero_bits_limit( zero_bits ), commit_size,
+                                               offset_ptr, size_ptr, alloc_type, protect, 0 );
+        ios_map_note_map( NT_SUCCESS(st) );
+        if (!NT_SUCCESS(st))
+            ios_map_fail( "NtMapViewOfSection", st, handle, process, hint0, zero_bits,
+                          size0, commit_size, offset_ptr, alloc_type, protect );
+        return st;
+    }
 }
 
 /***********************************************************************
@@ -31998,6 +32197,10 @@ NTSTATUS WINAPI NtMapViewOfSectionEx( HANDLE handle, HANDLE process, PVOID *addr
     unsigned int status;
     SIZE_T mask = granularity_mask;
     LARGE_INTEGER offset;
+    /* ml1216: as in NtMapViewOfSection -- the caller's words, before any
+     * rounding rewrites *addr_ptr and before virtual_map_section takes both. */
+    const void *hint0 = *addr_ptr;
+    const SIZE_T size0 = *size_ptr;
 
     offset.QuadPart = offset_ptr ? offset_ptr->QuadPart : 0;
 
@@ -32006,24 +32209,51 @@ NTSTATUS WINAPI NtMapViewOfSectionEx( HANDLE handle, HANDLE process, PVOID *addr
 
     status = get_extended_params( parameters, count, &limit_low, &limit_high,
                                   &align, &attributes, &machine );
-    if (status) return status;
+    if (status)
+    {
+        ios_map_note_map( 0 );
+        ios_map_fail( "NtMapViewOfSectionEx", status, handle, process, hint0, 0, size0, 0,
+                      offset_ptr, alloc_type, protect );
+        return status;
+    }
 
-    if (align) return STATUS_INVALID_PARAMETER;
-    if (*addr_ptr && (limit_low || limit_high)) return STATUS_INVALID_PARAMETER;
+    if (align)
+    {
+        ios_map_note_map( 0 );
+        ios_map_fail( "NtMapViewOfSectionEx", STATUS_INVALID_PARAMETER, handle, process,
+                      hint0, 0, size0, 0, offset_ptr, alloc_type, protect );
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (*addr_ptr && (limit_low || limit_high))
+    {
+        ios_map_note_map( 0 );
+        ios_map_fail( "NtMapViewOfSectionEx", STATUS_INVALID_PARAMETER, handle, process,
+                      hint0, 0, size0, 0, offset_ptr, alloc_type, protect );
+        return STATUS_INVALID_PARAMETER;
+    }
 
     if (alloc_type & AT_ROUND_TO_PAGE)
     {
-        if (is_win64 || is_wow64()) return STATUS_INVALID_PARAMETER;
+        if (is_win64 || is_wow64())
+        {
+            ios_map_note_map( 0 );
+            ios_map_fail( "NtMapViewOfSectionEx", STATUS_INVALID_PARAMETER, handle, process,
+                          hint0, 0, size0, 0, offset_ptr, alloc_type, protect );
+            return STATUS_INVALID_PARAMETER;
+        }
         *addr_ptr = ROUND_ADDR( *addr_ptr, page_mask );
         mask = page_mask;
     }
 
     if (alloc_type & MEM_REPLACE_PLACEHOLDER) mask = page_mask;
-    if (offset.u.LowPart & mask) return STATUS_MAPPED_ALIGNMENT;
-    if ((UINT_PTR)*addr_ptr & mask) return STATUS_MAPPED_ALIGNMENT;
+    if (offset.u.LowPart & mask) { ios_map_note_map( 0 ); ios_map_fail( "NtMapViewOfSectionEx", STATUS_MAPPED_ALIGNMENT, handle, process, hint0, 0, size0, 0, offset_ptr, alloc_type, protect ); return STATUS_MAPPED_ALIGNMENT; }
+    if ((UINT_PTR)*addr_ptr & mask) { ios_map_note_map( 0 ); ios_map_fail( "NtMapViewOfSectionEx", STATUS_MAPPED_ALIGNMENT, handle, process, hint0, 0, size0, 0, offset_ptr, alloc_type, protect ); return STATUS_MAPPED_ALIGNMENT; }
     if ((UINT_PTR)*addr_ptr & host_page_mask)
     {
         ERR( "unaligned placeholder at %p\n", *addr_ptr );
+        ios_map_note_map( 0 );
+        ios_map_fail( "NtMapViewOfSectionEx", STATUS_MAPPED_ALIGNMENT, handle, process,
+                      hint0, 0, size0, 0, offset_ptr, alloc_type, protect );
         return STATUS_MAPPED_ALIGNMENT;
     }
 
@@ -32045,18 +32275,35 @@ NTSTATUS WINAPI NtMapViewOfSectionEx( HANDLE handle, HANDLE process, PVOID *addr
         call.map_view_ex.prot         = protect;
         call.map_view_ex.machine      = machine;
         status = server_queue_process_apc( process, &call, &result );
-        if (status != STATUS_SUCCESS) return status;
+        if (status != STATUS_SUCCESS)
+        {
+            ios_map_note_map( 0 );
+            ios_map_fail( "NtMapViewOfSectionEx/APC", status, handle, process, hint0, 0,
+                          size0, 0, offset_ptr, alloc_type, protect );
+            return status;
+        }
 
         if (NT_SUCCESS(result.map_view_ex.status))
         {
             *addr_ptr = wine_server_get_ptr( result.map_view_ex.addr );
             *size_ptr = result.map_view_ex.size;
         }
+        ios_map_note_map( NT_SUCCESS(result.map_view_ex.status) );
+        if (!NT_SUCCESS(result.map_view_ex.status))
+            ios_map_fail( "NtMapViewOfSectionEx/APC", result.map_view_ex.status, handle, process,
+                          hint0, 0, size0, 0, offset_ptr, alloc_type, protect );
         return result.map_view_ex.status;
     }
 
-    return virtual_map_section( handle, addr_ptr, limit_low, limit_high, 0,
-                                offset_ptr, size_ptr, alloc_type, protect, machine );
+    {
+        unsigned int st = virtual_map_section( handle, addr_ptr, limit_low, limit_high, 0,
+                                               offset_ptr, size_ptr, alloc_type, protect, machine );
+        ios_map_note_map( NT_SUCCESS(st) );
+        if (!NT_SUCCESS(st))
+            ios_map_fail( "NtMapViewOfSectionEx", st, handle, process, hint0, 0, size0, 0,
+                          offset_ptr, alloc_type, protect );
+        return st;
+    }
 }
 
 
