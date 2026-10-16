@@ -76,17 +76,22 @@ fi
 # is the same tool and the same spec the build would have used - it just does not
 # depend on a generated make target name, which makedep does not expose.
 WB="$B/tools/winebuild/winebuild"
-SPEC="$B/dlls/dbghelp/dbghelp.spec"
-# Wine copies the module spec into the build tree; fall back to the tracked one
-# so a generated copy that is absent or named differently does not silently skip
-# the whole step - which is what run 38843362962 did, since the stage continued
-# to the verification block with no archive and no error.
-[ -f "$SPEC" ] || SPEC="$R/wine/dlls/dbghelp/dbghelp.spec"
+# Use the exact argument form Wine's own generated rules use, captured from the
+# same build's log rather than guessed:
+#   winebuild -w --implib -o dlls/ntdll/arm64ec-windows/libntdll.a \
+#             --cc-cmd="arm64ec-w64-mingw32-clang -D__STDC__" -b arm64ec-windows \
+#             --export ../dlls/ntdll/ntdll.spec
+# -b is --target (main.c:180), -w is --warnings (:215), --cc-cmd is :182, and the
+# spec is passed as --export with a path relative to the build directory. Wine
+# never emits this command for dbghelp - its import libraries are only built for
+# modules something links against - which is why the archive was absent.
 echo "  winebuild binary: $WB [$([ -x "$WB" ] && echo executable || echo 'absent or not executable')]"
-echo "  spec file:        $SPEC [$([ -f "$SPEC" ] && echo present || echo absent)]"
-if [ ! -f "$B/dlls/dbghelp/$INSTALL_DIR/libdbghelp.a" ] && [ -x "$WB" ] && [ -f "$SPEC" ]; then
-    "$WB" --dll-name dbghelp --implib \
-        -o "$B/dlls/dbghelp/$INSTALL_DIR/libdbghelp.a" "$SPEC" \
+if [ ! -f "$B/dlls/dbghelp/$INSTALL_DIR/libdbghelp.a" ] && [ -x "$WB" ]; then
+    ( cd "$B" && "$WB" -w --implib \
+        -o "dlls/dbghelp/$INSTALL_DIR/libdbghelp.a" \
+        --cc-cmd="arm64ec-w64-mingw32-clang -D__STDC__" \
+        -b "$INSTALL_DIR" \
+        --export ../dlls/dbghelp/dbghelp.spec ) \
         || echo "  winebuild --implib failed (exit $?); archive not produced"
     [ -f "$B/dlls/dbghelp/$INSTALL_DIR/libdbghelp.a" ] \
         && echo "  winebuild --implib wrote libdbghelp.a ($(wc -c < "$B/dlls/dbghelp/$INSTALL_DIR/libdbghelp.a" | tr -d ' ') bytes)"
