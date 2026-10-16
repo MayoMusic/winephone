@@ -77,10 +77,19 @@ fi
 # depend on a generated make target name, which makedep does not expose.
 WB="$B/tools/winebuild/winebuild"
 SPEC="$B/dlls/dbghelp/dbghelp.spec"
+# Wine copies the module spec into the build tree; fall back to the tracked one
+# so a generated copy that is absent or named differently does not silently skip
+# the whole step - which is what run 38843362962 did, since the stage continued
+# to the verification block with no archive and no error.
+[ -f "$SPEC" ] || SPEC="$R/wine/dlls/dbghelp/dbghelp.spec"
+echo "  winebuild binary: $WB [$([ -x "$WB" ] && echo executable || echo 'absent or not executable')]"
+echo "  spec file:        $SPEC [$([ -f "$SPEC" ] && echo present || echo absent)]"
 if [ ! -f "$B/dlls/dbghelp/$INSTALL_DIR/libdbghelp.a" ] && [ -x "$WB" ] && [ -f "$SPEC" ]; then
     "$WB" --dll-name dbghelp --implib \
-        -o "$B/dlls/dbghelp/$INSTALL_DIR/libdbghelp.a" "$SPEC"
-    echo "  winebuild --implib wrote libdbghelp.a"
+        -o "$B/dlls/dbghelp/$INSTALL_DIR/libdbghelp.a" "$SPEC" \
+        || echo "  winebuild --implib failed (exit $?); archive not produced"
+    [ -f "$B/dlls/dbghelp/$INSTALL_DIR/libdbghelp.a" ] \
+        && echo "  winebuild --implib wrote libdbghelp.a ($(wc -c < "$B/dlls/dbghelp/$INSTALL_DIR/libdbghelp.a" | tr -d ' ') bytes)"
 fi
 # winemetal/meson.build:24 searches only
 # join_paths(wine_build_path, 'dlls/dbghelp', windows_builtin_install_dir), so
