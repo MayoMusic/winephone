@@ -2424,7 +2424,7 @@ static void *anon_mmap_tryfixed( void *start, size_t size, int prot, int flags )
 void ios_jumbo_holdback_init( void )
 {
     static int done;
-    unsigned long long want = 0, ceiling = 0;
+    unsigned long long want = 0, ceiling = 0, floor = 0;
     mach_vm_address_t addr = 0, prev_end = 0, best_at = 0;
     unsigned long long best = 0;
     task_vm_info_data_t vmi;
@@ -2454,6 +2454,34 @@ void ios_jumbo_holdback_init( void )
     if (task_info( mach_task_self(), TASK_VM_INFO, (task_info_t)&vmi, &cnt ) == KERN_SUCCESS)
         ceiling = (unsigned long long)vmi.max_address;
     if (!ceiling) ceiling = 0x1000000000ull;
+
+    /* ml1140: start the walk at the task's MINIMUM user address, not at 0.
+     *
+     * A log on iPhone18,3 / iOS 27.0.1 (ROTTR.exe, 2026-10-16 15:50:44) shows
+     * what the walk used to do:
+     *
+     *   [jumbo-hold] ml996 want=3072 MB; largest free hole 0x0 +4136 MB
+     *   [jumbo-hold] ml996 reserve of 0x428d0000 +3072 MB FAILED errno=12
+     *
+     * The largest free hole starts at address ZERO -- the gap below the first
+     * mapping. A task cannot map there: the kernel reserves the low addresses
+     * and anon_mmap_tryfixed's mach_vm_map(VM_FLAGS_FIXED) returns a kern error
+     * that the caller folds to ENOMEM. So the holdback was placed where it could
+     * never be mapped, and the one reserve this exists to serve still failed.
+     *
+     * The hole is real free space, but the wrong end of it. TASK_VM_INFO already
+     * carries min_address, and the walk was reading max_address only. Starting at
+     * min_address skips addresses the kernel will refuse anyway and lets the same
+     * 4136 MB hole be found where it can actually be reserved. Holes below it are
+     * not usable address space, so nothing that ever worked is lost.
+     */
+    floor = (unsigned long long)vmi.min_address;
+    if (!floor) floor = 0x100000000ull;
+    if (floor < (unsigned long long)ceiling)
+    {
+        addr = (mach_vm_address_t)floor;
+        prev_end = (mach_vm_address_t)floor;
+    }
 
     /* largest free hole below the ceiling */
     while (addr < ceiling)
