@@ -325,3 +325,56 @@
 - **Status:** fix written. That the headers now generate and that MSAD,
   sample positions and tessellation work at run time are **UNVERIFIED**; this
   needs a macOS runner.
+
+## B-017: the shipped Wine prefix template is a frozen artefact nothing can rebuild or check
+
+- **Evidence:** `app/Madeira/prefix-template.tar.gz` is 787600 bytes, tracked in
+  git, and bundled as a resource — `project.pbxproj` carries
+  `A1000040 /* prefix-template.tar.gz in Resources */` — and
+  `app/Madeira/PrefixExtractor.c`/`.h` unpack it on first launch. It is the
+  skeleton every prefix starts from, and `DockReset.swift` reads it to restore
+  the values a fresh prefix must have.
+- **The gap:** `tools/build-prefix-snapshot.sh` documents itself as producing
+  exactly this file ("Output: app/Madeira/prefix-template.tar.gz") and
+  `tools/check-prefix-template.sh` exists to reject a template carrying absolute
+  host symlinks — a guard written after `ml719`, where six links into the build
+  machine's home directory shipped and every Windows shell-folder lookup silently
+  failed on device. **Nothing in `scripts/`, `build/`, the workflow or `tools/`
+  calls either script.** A search for `prefix-template`, `build-prefix-snapshot`
+  and `check-prefix-template` across all of them returns no caller.
+- **Why it matters:** this is the same class of problem as B-013. The template is
+  a frozen artefact from the original development machine, so a clean checkout
+  cannot regenerate it, cannot validate it, and if its contents ever need to
+  change for a title there is no reproducible way to produce the new one. The
+  `check-prefix-template.sh` guard is currently decorative.
+- **Mitigating:** the archive is tracked, so it does ship. The risk is
+  reproducibility and silent divergence, not a missing file.
+- **Next path:** decide whether regeneration belongs in CI. `build-prefix-snapshot.sh`
+  runs `wineboot --init`, which needs a Wine that executes on the macOS runner —
+  and the workflow installs only `cmake ninja meson bison`, no Wine. So the
+  honest options are (a) keep the frozen archive and wire in
+  `check-prefix-template.sh` as a cheap CI assertion, or (b) add a macOS Wine and
+  make the snapshot regenerable. (a) is cheap and catches the failure mode
+  `ml719` describes; (b) is expensive and only pays off if the prefix must change.
+- **Status:** identified, not fixed. No change made in this session.
+
+## B-018: the app declares a lower minimum iOS than its JIT helper requires
+
+- **Evidence:** `project.pbxproj` sets `IPHONEOS_DEPLOYMENT_TARGET = 17.0` on
+  targets, while the `StikJIT.framework` build phase in the same file hardcodes
+  `CFBundleSupportedPlatforms:0 = iPhoneOS` and `MinimumOSVersion = 26.0`, and
+  Madeira's `README.md` states "An iPhone on iOS 26 or later, the only version
+  Madeira currently runs on reliably". The Unix stages likewise compile with
+  `-miphoneos-version-min=17.0`.
+- **Why it matters:** an IPA declaring 17.0 will install on an iOS 17-25 device,
+  where the JIT helper cannot work, so the failure appears at run time as an
+  app that launches and then cannot translate code — rather than as a clean
+  "requires iOS 26" at install. Nothing in the workflow sets the minimum, and the
+  IPA validator in `tools/validate-ipa.sh` does not check it.
+- **Next path:** either raise `IPHONEOS_DEPLOYMENT_TARGET` to 26.0, or have
+  `tools/validate-ipa.sh` read the built app's `MinimumOSVersion` and fail when it
+  is below what `StikJIT.framework` declares. The second is preferable because it
+  reports the inconsistency instead of hiding it.
+- **Status:** identified, not fixed. The user has said this project targets
+  iOS 26, so nothing here blocks them; it would mislead a future reader or a
+  device on an older release.
