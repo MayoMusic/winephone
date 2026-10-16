@@ -1,7 +1,17 @@
-# Install notes (not yet tested)
+# Install notes (untested on any device)
 
-There is no IPA to install yet. The GitHub workflow is intended to produce an
-unsigned artifact. It will need to be signed for your device with your Apple
+**Status 2026-10-16:** CI now produces an unsigned IPA
+(`artifacts/WinePhone-unsigned.ipa`) and uploads it as the workflow artifact
+`WinePhone-unsigned-IPA` once `WINEPHONE_BINARY_RELEASE_CLEARED` is set; that
+variable is currently set. See DECISIONS.md, "Personal-use IPA distribution", for
+exactly what that gate permits - **personal use only**, not publication and not
+sharing with anyone else.
+
+**The IPA is untested.** It has never been installed or launched. No boot, no
+Metal frame, no JIT enablement and no game run is claimed, and no performance
+figure of any kind exists.
+
+It will need to be signed for your device with your Apple
 ID using SideStore, AltStore, or another signing tool. The signing flow and
 entitlements must be checked on the actual iPhone 17/iOS 27 before claiming
 installation support.
