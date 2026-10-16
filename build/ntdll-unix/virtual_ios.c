@@ -2324,9 +2324,34 @@ static void ios_va_gap_probe( const char *why )
         mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
         mach_port_t obj = MACH_PORT_NULL;
 
+        /* ml1141: a failed query is not evidence of free space.
+         *
+         * mach_vm_region stops succeeding at the top of the task's map: on
+         * iPhone18,3 the walk reaches the ceiling 0x7180000000 and the next
+         * call returns KERN_INVALID_ADDRESS. The old code broke out and then
+         * printed everything from there to VA_TOP as FREE, which is how a run
+         * reported "FREE 0x7180000000..0x8000000000 = 59392 MB (top tail)" -
+         * 56 GB that is not in the task at all and can never be allocated.
+         * ios_va_window_census's ml787 clamp already says so in as many words.
+         *
+         * So stop counting at the last region actually observed, and say why
+         * the walk ended rather than converting the unknown into a number. */
         if (mach_vm_region( mach_task_self(), &addr, &size, VM_REGION_BASIC_INFO_64,
                             (vm_region_info_t)&info, &cnt, &obj ) != KERN_SUCCESS)
+        {
+            task_vm_info_data_t vmi;
+            mach_msg_type_number_t vc = TASK_VM_INFO_COUNT;
+            unsigned long long ceiling = 0;
+            if (task_info( mach_task_self(), TASK_VM_INFO, (task_info_t)&vmi, &vc ) == KERN_SUCCESS)
+                ceiling = (unsigned long long)vmi.max_address;
+            dprintf(2, "[va-gaps] walk stopped at 0x%llx (query failed); ceiling is 0x%llx. "
+                    "0x%llx..0x%llx was NOT measured and is NOT counted%s\n",
+                    (unsigned long long)prev_end, ceiling,
+                    (unsigned long long)prev_end, (unsigned long long)VA_TOP,
+                    ceiling && prev_end >= ceiling ? " (above the task ceiling: unreachable)"
+                                                   : " (inside the task map: unknown)" );
             break;
+        }
         if (addr > prev_end)
         {
             mach_vm_size_t gap = addr - prev_end;
@@ -2347,9 +2372,10 @@ static void ios_va_gap_probe( const char *why )
     if (prev_end < VA_TOP)
     {
         unsigned long long tail = (unsigned long long)((VA_TOP - prev_end) >> 20);
-        usable_mb += tail;
-        dprintf(2, "[va-gaps] FREE 0x%llx..0x%llx = %llu MB (top tail)\n",
-                (unsigned long long)prev_end, (unsigned long long)VA_TOP, tail);
+        if (tail)
+            dprintf(2, "[va-gaps] UNMEASURED 0x%llx..0x%llx = %llu MB "
+                    "(the walk ended before this range; not counted as free)\n",
+                    (unsigned long long)prev_end, (unsigned long long)VA_TOP, tail);
     }
     dprintf(2, "[va-gaps] ==== end: %llu MB (%llu GB) usable outside the carveout ====\n",
             usable_mb, usable_mb >> 10);

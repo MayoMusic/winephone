@@ -63,7 +63,12 @@ typedef uint64_t mach_vm_address_t, mach_vm_size_t;
 typedef int *vm_region_info_t, *vm_region_recurse_info_t, *task_info_t;
 typedef struct { int protection; } vm_region_basic_info_data_64_t;
 typedef struct { int protection; } vm_region_submap_info_data_64_t;
-typedef struct { unsigned long long max_address; } task_vm_info_data_t;
+/* XNU osfmk/mach/task_info.h, struct task_vm_info, "added for rev2":
+ * mach_vm_address_t min_address; mach_vm_address_t max_address;
+ * Both are mach_vm_address_t (vm_offset_t), which is why the stub spells them
+ * the same way. TASK_VM_INFO (flavor 22) returns rev7, so rev2's pair is
+ * always present when the query succeeds. */
+typedef struct { unsigned long long min_address; unsigned long long max_address; } task_vm_info_data_t;
 #define KERN_SUCCESS 0
 #define KERN_NO_SPACE 3
 #define MACH_PORT_NULL 0
@@ -137,8 +142,11 @@ static kern_return_t mach_vm_region(int t, mach_vm_address_t *a, mach_vm_size_t 
 static kern_return_t mach_vm_region_recurse(int t, mach_vm_address_t *a, mach_vm_size_t *s, natural_t *d,
                                             vm_region_recurse_info_t i, mach_msg_type_number_t *c)
 { (void)t; (void)a; (void)s; (void)d; (void)i; (void)c; return 1; }
+static unsigned long long mock_min_address = 0x10029c000ull;
+static unsigned long long mock_max_address = 0x8000000000ull;
 static kern_return_t task_info(int t, int f, task_info_t out, mach_msg_type_number_t *c)
-{ (void)t; (void)f; (void)c; ((task_vm_info_data_t *)out)->max_address = 0x8000000000ull; return KERN_SUCCESS; }
+{ (void)t; (void)f; (void)c; ((task_vm_info_data_t *)out)->min_address = mock_min_address;
+  ((task_vm_info_data_t *)out)->max_address = mock_max_address; return KERN_SUCCESS; }
 static void *anon_mmap_tryfixed(void *start, size_t size, int prot, int flags)
 { (void)size; (void)prot; (void)flags; return start; }
 static int cfg_jumbo_mb;
