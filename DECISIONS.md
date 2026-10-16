@@ -58,3 +58,30 @@
 ## Binary release gate review (2026-10-14)
 
 **Decision: not cleared.** The pinned Wine fork's `wine/LICENSE-MADEIRA.md` says LGPL-2.1-or-later, while the root `THIRD-PARTY-NOTICES.md` describes the fork as GPL-3.0-or-later. The base project's own `docs/LICENSING.md` calls lawyer review and a clean recipient rebuild/relink/re-sign/install test open items. GnuTLS, FFmpeg and the DXMT D3D9 frontend also bring LGPL static-link obligations. Removing Apple's converter and custom D3D12 files removes that separate proprietary component but does not settle these remaining questions. Therefore do not set the repository variable `WINEPHONE_BINARY_RELEASE_CLEARED`; CI may build and validate locally, but must not publish an IPA artifact. This is a source and evidence gate decision, not a conclusion that source publication is unlawful.
+
+## Personal-use IPA distribution (2026-10-16)
+
+- **Decision:** set the repository variable `WINEPHONE_BINARY_RELEASE_CLEARED=true`,
+  so CI verifies the IPA's hash and uploads it as a workflow artifact. This is a
+  **narrower change than the earlier "not cleared" decision** and does not
+  reverse it.
+- **Reasoning.** The earlier decision (see above) was about *distribution*: LGPL
+  obliges a distributor to let recipients relink, and that was unproven.
+  Installing an unsigned IPA on the user's own iPhone for personal use is not
+  distribution — no binary is conveyed to anyone else — so that obligation is
+  not engaged for this use. The artifact stays a private workflow artifact on
+  this repository; it is not published as a Release and not pushed anywhere
+  public.
+- **Scope and limits, stated plainly.**
+  - Permitted: the user downloads the artifact and sideloads it on their own
+    device for their own use.
+  - Still not permitted, and not cleared by this decision: publishing the IPA as
+    a GitHub Release, distributing it to other people, or building the
+    Apple-D3D12/converter path. Those still need the component-by-component
+    provenance review recorded in `BLOCKERS.md` B-005.
+  - `LICENSE-EXCEPTION.md` still does not extend to upstream Wine (D-002). That
+    is unchanged.
+- **Verification status of the artifact.** It is built and structurally
+  validated, and `111/111` host regression checks pass, but **nothing has run
+  on a device**: no boot, no Metal frame, no JIT, no game, and **no performance
+  number of any kind**. The IPA is untested.
