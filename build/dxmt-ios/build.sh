@@ -23,13 +23,6 @@ INCLUDES_DIRECTX="-I$DXMT_ROOT/include/native/directx -I$DXMT_ROOT/include/nativ
 INCLUDES_SHADERS="-I$BUILD_DIR/shader-headers"
 LLVM_INCLUDES="-I$LLVM_BUILD/include -I$LLVM_SRC/include"
 AIRCONV_DEFS="-D_FILE_OFFSET_BITS=64 -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS"
-# WinePhone builds airconv without Apple's licensed Metal Shader Converter
-# headers. air_msad.h / air_samplepos.h / air_tessellation.h ship only in that
-# package; the package is licence-bound, this tree deliberately omits the
-# converter, and scripts/build-ipa.sh rejects an IPA containing it. The patch
-# keeps the whole DXBC->AIR path and stubs three optional intrinsic libraries
-# (MSAD, sample positions, tessellation) - see BLOCKERS.md B-016.
-AIRCONV_DEFS="$AIRCONV_DEFS -DWINEPHONE_NO_APPLE_AIR"
 CXX_FLAGS="-std=c++20 -fno-exceptions -fno-rtti"
 
 # MADEIRA (WOW64_DESIGN.md section 8, `dxmt_madeira_native`): the D3D9
@@ -151,18 +144,47 @@ compile_objc "$DXMT_SRC/winemetal/unix/winemetal_unix.c" winemetal_unix
 compile_objc "$DXMT_SRC/winemetal/unix/cache.c"          cache
 
 echo "=== airconv (C++ 20, needs LLVM headers) ==="
+# Generate the AIR intrinsic blobs' headers before compiling.
+#
+# airconv_context.cpp includes air_msad.h, air_samplepos.h and
+# air_tessellation.h. Those are NOT Apple-licensed material: dxmt/meson.build:149-165
+# generates them from the in-repository shaders with the same free tools the
+# meson build uses, and the sources are right here in the submodule:
+#   src/airconv/shaders/air_msad.metal        1493 bytes
+#   src/airconv/shaders/air_samplepos.metal   1305 bytes
+#   src/airconv/shaders/air_tessellation.metal 29134 bytes
+#     xcrun -sdk macosx metal -std=metal3.1 --target=air64-apple-macos14.0 \
+#            -o <n>.air -c <n>.metal      ->  <n>.air
+#     xxd -n <n> -i <n>.air <n>.h          ->  <n>.h   declaring the blob
+#
+# This stage compiles airconv_context.cpp directly with clang instead of going
+# through meson, so nothing generated them here and the compile failed with
+# "fatal error: 'air_msad.h' file not found" (run 38832880011). An earlier
+# revision of this script worked around that by stubbing the three link
+# functions out under -DWINEPHONE_NO_APPLE_AIR and recorded a licensing
+# restriction; that diagnosis was wrong and it silently cost MSAD, sample
+# positions and tessellation. Generating the real headers restores all three.
+# xcrun's `metal` subtool is a compiler shipped with Xcode, like clang.
+AIR_SHADERS_DIR="$DXMT_ROOT/src/airconv/shaders"
+AIR_HDR_DIR="$OBJ_DIR/air"
+mkdir -p "$AIR_HDR_DIR"
+for m in air_msad air_samplepos air_tessellation; do
+    echo "  $m.metal -> $m.air -> $m.h"
+    xcrun -sdk macosx metal -std=metal3.1 --target=air64-apple-macos14.0 \
+        -o "$AIR_HDR_DIR/$m.air" -c "$AIR_SHADERS_DIR/$m.metal"
+    xxd -n "$m" -i "$AIR_HDR_DIR/$m.air" "$AIR_HDR_DIR/$m.h"
+done
+AIRCONV_INCLUDES="-I$AIR_HDR_DIR"
 # Keep iOS adaptations as reviewable WinePhone patches, not edits to the dxmt
 # submodule. Same idempotent form as build/fex-ios/build.sh: if the patch is
 # already applied the reverse check passes and the block is skipped.
 #
-#   dxmt-airconv-noapple-air      drops Apple's licence-bound AIR headers and the
-#                                 three optional intrinsic blobs with them (B-016)
 #   dxmt-winemetal-static-implibs marks the winecrt0 and dbghelp lookups static,
 #                                 because Wine's import libraries are static
 #                                 archives and meson otherwise searches for a
 #                                 shared one and reports "not found" for archives
 #                                 that are present and verified
-for _p in dxmt-airconv-noapple-air dxmt-winemetal-static-implibs; do
+for _p in dxmt-winemetal-static-implibs; do
     _PATCH="$REPO_ROOT/patches/$_p.patch"
     if ! git -C "$DXMT_ROOT" apply --reverse --check "$_PATCH" >/dev/null 2>&1; then
         git -C "$DXMT_ROOT" apply --check "$_PATCH"
@@ -176,7 +198,7 @@ for cpp in airconv_context.cpp air_type.cpp air_signature.cpp air_operations.cpp
            dxbc_instructions.cpp dxbc_signature.cpp metallib_writer.cpp \
            dxso_compile.cpp ffp_compile.cpp; do
     name=$(basename "$cpp" .cpp)
-    compile_cxx "$DXMT_SRC/airconv/$cpp" "$name"
+    compile_cxx "$DXMT_SRC/airconv/$cpp" "$name" "$AIRCONV_INCLUDES"
 done
 compile_cxx "$DXMT_SRC/airconv/nt/air_builder.cpp" air_builder
 compile_cxx "$DXMT_SRC/airconv/nt/dxbc_converter_base.cpp" dxbc_converter_base

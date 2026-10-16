@@ -1,4 +1,4 @@
-# WinePhone blockers
+﻿# WinePhone blockers
 
 ## B-001: Local iOS build unavailable
 
@@ -61,16 +61,16 @@
 
 ## B-009: the stage-only path built none of the header prefixes the stage consumes
 
-- **Evidence:** run `38651245572` (`only_stage=wine-ntdll-unix`): `bcrypt_unixlib` and `secur32_unixlib` failed on `gnutls/gnutls.h` (`wine/dlls/bcrypt/gnutls.c:34`, `wine/dlls/secur32/schannel_gnutls.c:36`), `crypt32_unixlib` on `gnutls/pkcs12.h` (`build/crypto-unix/crypt32_unixlib_ios.c:40`), `winegstreamer_unixlib` on `libavcodec/avcodec.h` (`build/ntdll-unix/winegstreamer_unixlib_ios.c:251`), `dwrite_unixlib` on `ft2build.h` (`wine/dlls/dwrite/freetype.c:31`). `build/ntdll-unix/build.sh` reads those prefixes from `$REPO_ROOT`-relative paths (`:20-24`) that are **identical in both paths** — `toolchains/gnutls-ios`, `toolchains/ffmpeg-ios`, `research/freetype` — but the stage-only path ran none of their producers. `scripts/bootstrap.sh` builds only LLVM/toolchains (`:19-43`, `:66-83`): it never builds GnuTLS, FFmpeg or FreeType, and `research/freetype` is git-ignored (`.gitignore:113`). Madeira's `docs/BUILDING.md` at `279fd0f` has GnuTLS and FFmpeg as its first two steps (`:33-35`, `:38-42`) but its "Inputs that are not in the repository" table (`:17-25`) has no FreeType and no Wine build tree, and `build/freetype-ios/build.sh` at HEAD refused to run without a pre-cloned `research/freetype` (`:18`).
+- **Evidence:** run `38651245572` (`only_stage=wine-ntdll-unix`): `bcrypt_unixlib` and `secur32_unixlib` failed on `gnutls/gnutls.h` (`wine/dlls/bcrypt/gnutls.c:34`, `wine/dlls/secur32/schannel_gnutls.c:36`), `crypt32_unixlib` on `gnutls/pkcs12.h` (`build/crypto-unix/crypt32_unixlib_ios.c:40`), `winegstreamer_unixlib` on `libavcodec/avcodec.h` (`build/ntdll-unix/winegstreamer_unixlib_ios.c:251`), `dwrite_unixlib` on `ft2build.h` (`wine/dlls/dwrite/freetype.c:31`). `build/ntdll-unix/build.sh` reads those prefixes from `$REPO_ROOT`-relative paths (`:20-24`) that are **identical in both paths** â€” `toolchains/gnutls-ios`, `toolchains/ffmpeg-ios`, `research/freetype` â€” but the stage-only path ran none of their producers. `scripts/bootstrap.sh` builds only LLVM/toolchains (`:19-43`, `:66-83`): it never builds GnuTLS, FFmpeg or FreeType, and `research/freetype` is git-ignored (`.gitignore:113`). Madeira's `docs/BUILDING.md` at `279fd0f` has GnuTLS and FFmpeg as its first two steps (`:33-35`, `:38-42`) but its "Inputs that are not in the repository" table (`:17-25`) has no FreeType and no Wine build tree, and `build/freetype-ios/build.sh` at HEAD refused to run without a pre-cloned `research/freetype` (`:18`).
 - **Impact:** Four of six failures in the stage; the whole crypto/network, media and text (dwrite) side of `libntdll_unix.a`.
-- **Next path:** `scripts/build-ipa.sh:68-69` now runs the `gnutls` and `ffmpeg` stages before `wine-macos`/`wine-ntdll-unix` in the `only_stage=wine-ntdll-unix` path; FreeType is a separate pinned build with its own cache key (`.github/workflows/build-ipa.yml:88-113`, `winephone-freetype-2.13.3-42608f77…`) whose script clones tag `VER-2-13-3` and verifies the annotated tag's **commit** (`42608f77f20749dd6ddc9e0536788eaad70ea4b5`). The toolchain cache key is untouched, so LLVM is not rebuilt.
+- **Next path:** `scripts/build-ipa.sh:68-69` now runs the `gnutls` and `ffmpeg` stages before `wine-macos`/`wine-ntdll-unix` in the `only_stage=wine-ntdll-unix` path; FreeType is a separate pinned build with its own cache key (`.github/workflows/build-ipa.yml:88-113`, `winephone-freetype-2.13.3-42608f77â€¦`) whose script clones tag `VER-2-13-3` and verifies the annotated tag's **commit** (`42608f77f20749dd6ddc9e0536788eaad70ea4b5`). The toolchain cache key is untouched, so LLVM is not rebuilt.
 - **Status:** Fixed, **UNVERIFIED** until the next stage-limited run.
 
 ## B-010: two unixlibs need widl-generated headers, which only a *built* Wine tree has
 
-- **Evidence:** `wine/dlls/dwrite/dwrite_private.h:24-25` includes `dwrite_3.h` and `d2d1.h` (`wine/dlls/dwrite/freetype.c:44` includes `dwrite_private.h`), and `wine/dlls/winegstreamer/unixlib.h:32` includes `mfobjects.h`; none of those four headers exists anywhere in the checkout (`find wine -name dwrite_3.h -o -name d2d1.h -o -name mfobjects.h -o -name mftransform.h` is empty — only the `.idl` inputs are tracked). They are widl output and widl is itself a build product, so configure alone cannot create them: `wine/aclocal.m4:293` `wine_fn_config_makefile()` and `wine/configure:24365` `wine_fn_output_makedep()` only *write* the rules (makedep is compiled and run there), and `wine/tools/makedep.c:2004-2009` gives every `include/*.idl` a `.h` target in that directory's Makefile, invoking widl by its literal path (`:4914`). In both pipeline paths `wine-ntdll-unix` (`scripts/build-ipa.sh:71`, `:96`) runs before the first `make` in a Wine tree (`wine-pe-ntdll`, `build/wine-pe/build-ntdll.sh:20`). Run `38651245572` could not show this: `dwrite` stops at `ft2build.h` first and `winegstreamer` at `avcodec.h`.
+- **Evidence:** `wine/dlls/dwrite/dwrite_private.h:24-25` includes `dwrite_3.h` and `d2d1.h` (`wine/dlls/dwrite/freetype.c:44` includes `dwrite_private.h`), and `wine/dlls/winegstreamer/unixlib.h:32` includes `mfobjects.h`; none of those four headers exists anywhere in the checkout (`find wine -name dwrite_3.h -o -name d2d1.h -o -name mfobjects.h -o -name mftransform.h` is empty â€” only the `.idl` inputs are tracked). They are widl output and widl is itself a build product, so configure alone cannot create them: `wine/aclocal.m4:293` `wine_fn_config_makefile()` and `wine/configure:24365` `wine_fn_output_makedep()` only *write* the rules (makedep is compiled and run there), and `wine/tools/makedep.c:2004-2009` gives every `include/*.idl` a `.h` target in that directory's Makefile, invoking widl by its literal path (`:4914`). In both pipeline paths `wine-ntdll-unix` (`scripts/build-ipa.sh:71`, `:96`) runs before the first `make` in a Wine tree (`wine-pe-ntdll`, `build/wine-pe/build-ntdll.sh:20`). Run `38651245572` could not show this: `dwrite` stops at `ft2build.h` first and `winegstreamer` at `avcodec.h`.
 - **Impact:** Without the headers, `dwrite_unixlib` and `winegstreamer_unixlib` fail as soon as B-009 is fixed, so `libntdll_unix.a` still cannot be linked.
-- **Next path:** `build/wine-macos/configure.sh` now generates them in `wine/build-macos/include` — the tree every unix side already includes — with `make -C wine/build-macos/tools/widl` (only when the binary is absent) followed by `make -C wine/build-macos/include`, and prints `present`/`MISSING` for all four headers. It is deliberately best-effort: a failure is printed and the stage continues, so the diagnosis stays with `build/ntdll-unix/build.sh:26-73` and any compile still fails loudly with its command line.
+- **Next path:** `build/wine-macos/configure.sh` now generates them in `wine/build-macos/include` â€” the tree every unix side already includes â€” with `make -C wine/build-macos/tools/widl` (only when the binary is absent) followed by `make -C wine/build-macos/include`, and prints `present`/`MISSING` for all four headers. It is deliberately best-effort: a failure is printed and the stage continues, so the diagnosis stays with `build/ntdll-unix/build.sh:26-73` and any compile still fails loudly with its command line.
 - **Status:** Fix added, **UNVERIFIED**: the make invocations were read out of makedep/configure, not executed (this worktree has no macOS, no bison/flex and no root, so no Wine build tree can be generated); whether `make -C include` needs further generated sources first is unknown.
 
 ## B-011: the unix-side header diagnostic named two paths that are not dependencies
@@ -93,7 +93,7 @@
     configuration. What the compile really needs from the build tree is the
     generated `ftconfig.h` (the UNIX one, from `builds/unix/ftconfig.h.in`),
     named *before* `research/freetype/include` so it wins over the ANSI copy
-    there — the order `build/win32u-unix/build.sh` has always used. Comparing
+    there â€” the order `build/win32u-unix/build.sh` has always used. Comparing
     the two files: `builds/unix/ftconfig.h.in` differs from
     `include/freetype/config/ftconfig.h` only by `#undef HAVE_UNISTD_H` /
     `#undef HAVE_FCNTL_H`, which CMake turns into defines when the headers are
@@ -154,7 +154,7 @@
   produced it: it was an out-of-band artifact of the original development
   machine. The Xcode project links it (`project.pbxproj:74`), so it is a real
   input, not a diagnostic nicety.
-- **Impact:** every clean checkout — i.e. every CI run — fails at this stage,
+- **Impact:** every clean checkout â€” i.e. every CI run â€” fails at this stage,
   so `win32u-unix`, `wine-pe-*`, DXMT, `xcodebuild` and the IPA can never run.
 - **Next path:** `build/wineserver/build.sh` now produces the base itself:
   `build_base_from_source()` compiles every `.c` in the pinned submodule's
@@ -177,7 +177,7 @@
   is also dispatchable on its own (`only_stage=wineserver`, which runs the
   `wine-macos` configure it needs first) so it can be checked without the
   fex-ios/fex-arm64ec legs.
-- **ABI hazard this repair removes — found by reading the fork, not documented
+- **ABI hazard this repair removes â€” found by reading the fork, not documented
   elsewhere.** `wine/server/thread.h:147-148` carries
   `C_ASSERT( offsetof(struct thread, completion_wait) == 640 )` and
   `C_ASSERT( offsetof(struct thread, token) == 600 )` under `WINE_IOS`. The
@@ -187,7 +187,7 @@
   offsets they were compiled with, and that inserting a field anywhere above
   `ios_mach_suspended` moved `completion_wait` 640 -> 648 and made
   `cleanup_thread_completion()` dereference garbage on every thread teardown
-  (fault `0x110e5e0007b5`) — undetected, because the `objcopy` repack refreshes
+  (fault `0x110e5e0007b5`) â€” undetected, because the `objcopy` repack refreshes
   every member's mtime so the archive still looked freshly built. It then gives
   the instruction that this repair follows: "either move your new field to the
   end of the struct, **or rebuild every object in the archive from these
@@ -204,7 +204,7 @@
   target: `offsetof` depends on the target ABI, so this host's x86-64 numbers
   prove nothing.
 
-## B-014: FEX diagnostics recorded as warnings — adjudicated, not "fixed"
+## B-014: FEX diagnostics recorded as warnings â€” adjudicated, not "fixed"
 
 - **Evidence:** the `only_stage=all` log the user supplied (also summarised in
   `docs/HANDOFF.md`) records, from the pinned FEX fork
@@ -221,11 +221,11 @@
   access is `Info->FileNameLength == 4 && Info->FileName[0] == '.' &&
   Info->FileName[1] == '.'`, so `FileName[1]` is only evaluated when the
   reported length is two WCHARs of a name `NtQueryDirectoryFile` wrote into the
-  buffer — the warning is the compiler's view of the `WCHAR FileName[1]`
+  buffer â€” the warning is the compiler's view of the `WCHAR FileName[1]`
   flexible-array declaration, not a reachable out-of-bounds read. The file's
   `LoadAOTImages` also differs substantially from current FEX upstream `main`
   (upstream carries `CacheFile`/`EnableLoadedSection` code this pin does not
-  have), so the pin's shape is a fork/revision gap, not a WinePhone edit — this
+  have), so the pin's shape is a fork/revision gap, not a WinePhone edit â€” this
   is the fork's own code, and no WinePhone change was made to it.
 - **Impact:** none demonstrated: an unfalsifiable warning was resolved to false
   positive by reading the guard, and the platform-probe failures are expected
@@ -246,7 +246,7 @@
 - **Evidence:** the Xcode target links 20 static archives
   (`app/Madeira.xcodeproj/project.pbxproj`, `Frameworks` phase); 13 are bare
   file references (`path = libgnutls.a;` and so on), which
-  `tools/validate_release_inputs.py` resolves as `app/Madeira/<name>` — the same
+  `tools/validate_release_inputs.py` resolves as `app/Madeira/<name>` â€” the same
   base that makes the project's `../../FEX/build-ios/...` references resolve,
   and the base every other producer writes to
   (`app/Madeira/libwineserver.a`, `libntdll_unix.a`, `libwin32u_unix.a`,
@@ -258,7 +258,7 @@
   look.
 - **Impact:** `scripts/build-ipa.sh` runs `tools/validate_release_inputs.py`
   after every producer and before `xcodebuild`; with the four absent it exits 2
-  with `Missing linked archives: app/Madeira/libgnutls.a …`, and had the
+  with `Missing linked archives: app/Madeira/libgnutls.a â€¦`, and had the
   validator been bypassed the link would fail on the same files. It is the same
   producer/consumer class as B-013, one stage later; it could not be seen before
   because no run ever reached past the wineserver stage.
@@ -271,7 +271,7 @@
   four paths, like the other rebuilt archives.
   `tests/host/check-ipa-build-graph.py` now derives the bare-name set from the
   project file itself and requires a producer that places each one in
-  `app/Madeira` — the check that fails on B-013's and B-015's shape.
+  `app/Madeira` â€” the check that fails on B-013's and B-015's shape.
 - **Status:** fixed in the tree; **UNVERIFIED** until a macOS run executes the
   GnuTLS stage (no GnuTLS sources are built here) and the validator then sees
   the four files.
@@ -284,53 +284,44 @@
   resolved them one level up. If the next run's `xcodebuild` reports a missing
   archive after the validator passes, the resolution base is `app/` and the
   correct repair is to make those file references explicit (or copy alongside,
-  as the older entries imply) — the log will name the path.
+  as the older entries imply) â€” the log will name the path.
 
-## B-016: DXMT's airconv needs Apple's licensed AIR headers, which this tree must not ship
+## B-016: `airconv_context.cpp` could not find its generated AIR headers
 
-- **Evidence:** run `38832880011` reached `dxmt-ios` and failed on **one unit of
-  83** - `Results: 82 succeeded, 1 failed / Failed: airconv_context` - with
+- **Evidence:** run `38832880011` reached `dxmt-ios` and failed on one unit of
+  83 — `Results: 82 succeeded, 1 failed / Failed: airconv_context` — with
   `dxmt/src/airconv/airconv_context.cpp:29:10: fatal error: 'air_msad.h' file
-  not found`. That text is only visible because the preceding change routed
-  failing units through `report_failure()`; before it the log said nothing more
-  than the unit's name. A tree-wide search finds **no** `air_*.h` anywhere in
-  WinePhone: the headers are genuinely absent, not merely off the include path.
-- **What the headers are.** `airconv_context.cpp` includes exactly three of
-  them - `air_msad.h`, `air_samplepos.h`, `air_tessellation.h` - and uses them
-  for nothing else. They declare three precompiled AIR intrinsic bitcode blobs
-  (`air_msad`, `air_samplepos`, `air_tessellation`) consumed only at
-  `:188/:193/:198`. `initializeModule()` at `:39`, which stamps the
-  `air64-apple-macosx14.0.0` target triple and the `air.*` module flags that
-  every converted shader needs, does not touch them, and `airconv_public.h`
-  does not leak the blobs. So **the DXBC->AIR path that D3D11 depends on is
-  complete without them**; they carry three optional intrinsic libraries.
-- **Why they are absent on purpose.** They ship only inside Apple's Metal
-  Shader Converter, which is licence-bound. Madeira pins the 30 MB installer in
-  `build/madeira-d3d12/deps.sh` and carries a "Madeira Converter Exception"
-  (`LICENSE-EXCEPTION.md`, `Adopted on: 2026-09-24`) whose entire purpose is to
-  let GPL code use it. WinePhone's own recorded policy is stricter: it omits the
-  D3D12 conversion path pending licensing review, and `scripts/build-ipa.sh:139`
-  fails any build whose IPA contains `libmetaliconverter`, `d3d12core.dll` or
-  `madeira_d3d12`. Rule 2 and rule 8 hold: the converter is never used or
-  redistributed here.
-- **Fix applied.** `patches/dxmt-airconv-noapple-air.patch`, applied by
-  `build/dxmt-ios/build.sh` in the same idempotent form `build/fex-ios/build.sh`
-  uses, with `-DWINEPHONE_NO_APPLE_AIR`. The patch compiles out the three
-  includes and replaces the three `linkShader(M, <blob>)` bodies with no-ops; it
-  deliberately does **not** hand `linkShader` a dummy blob, because that is
-  templated on the blob's array size and would try to parse the dummy as
-  bitcode.
-- **Cost, stated plainly.** MSAD (multisample anisotropic depth), sample
-  positions and tessellation (Hull/Domain) intrinsics are no longer linked. A
-  shader that uses one will fail in the Metal compiler at run time instead of at
-  build time. That is a real compatibility limit, not a silent success, and any
-  title relying on tessellation is expected to need the licensed converter.
-- **Decision still open for the user.** The alternative is to accept Apple's
-  converter under Madeira's already-adopted exception and gain full MSAD /
-  sample-position / tessellation support, at the cost of shipping licence-bound
-  material and reversing the current `build-ipa.sh` prohibition. This session
-  did not take that route; the stub keeps the build moving and keeps the tree
-  clean of licensed binaries.
-- **Status:** fix written; the patched unit compiling, and the D3D11 path
-  working without MSAD/sample-position/tessellation, are **UNVERIFIED** until a
-  run completes `dxmt-ios` and links the app.
+  not found`.
+- **Root cause (corrected).** The three headers are **generated build
+  artefacts, not Apple-licensed material**, and the earlier entry in this file
+  said otherwise. `dxmt/meson.build:149-165` builds them from shaders that live
+  in the submodule itself — `src/airconv/shaders/air_msad.metal` (1493 bytes),
+  `air_samplepos.metal` (1305) and `air_tessellation.metal` (29134) — using
+  `xcrun -sdk macosx metal` to produce `<n>.air` and `xxd -n <n> -i <n>.air
+  <n>.h` to wrap it. Both are ordinary build tools: `xcrun`'s `metal` subtool is
+  a compiler shipped with Xcode, like `clang`. `xxd` is likewise ordinary and
+  was already proven present on the runner, because `meson.build:160` calls
+  `find_program('xxd')` during `dxmt-pe-configure` and that configure has
+  succeeded. Nothing here is Apple's licence-bound Metal Shader Converter, which
+  this tree still omits by policy (D-002) and which `scripts/build-ipa.sh` still
+  refuses to ship.
+- **Why it failed.** `build/dxmt-ios/build.sh` compiles the airconv sources
+  directly with clang instead of going through meson, so nothing generated those
+  headers and the compile had no `air_msad.h` to include.
+- **Fix.** The stage now generates all three headers with the exact commands
+  `dxmt/meson.build` uses, into `$OBJ_DIR/air`, and passes that directory on the
+  airconv compile line.
+- **Correction of a wrong decision.** The previous revision of this entry
+  recorded a licensing restriction, added
+  `patches/dxmt-airconv-noapple-air.patch`, and compiled the three link
+  functions out under `-DWINEPHONE_NO_APPLE_AIR`. That silently removed MSAD,
+  sample positions and tessellation — a real functional loss — on the strength
+  of a wrong cause. Both the patch and the define are deleted. The only remaining
+  patch for dxmt is `dxmt-winemetal-static-implibs.patch`.
+- **Method note.** This was found by reading `src/airconv/meson.build` for the
+  generators, not by another build-and-inspect cycle. The same question had
+  already been answered wrongly once from the symptom alone. Reading the build
+  system is cheap; a CI cycle is thirteen minutes.
+- **Status:** fix written. That the headers now generate and that MSAD,
+  sample positions and tessellation work at run time are **UNVERIFIED**; this
+  needs a macOS runner.
