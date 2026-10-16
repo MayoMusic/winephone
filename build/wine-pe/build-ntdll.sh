@@ -31,7 +31,11 @@ fi
   # The .so is a build byproduct and is never shipped, and the PE module does
   # not link it, so build the PE target directly - the same pattern
   # build-modules.sh already uses successfully for every other PE module.
-  cd "$B" && make -C dlls/ntdll/arm64ec-windows ntdll.dll
+  # Target path is relative to the build root, the way build-modules.sh invokes
+  # make ("make -C "$B" ... dlls/<m>/arm64ec-windows/<f>.dll"). arm64ec-windows/
+  # is a build output directory, not a directory with make rules: passing -C into
+  # it fails with "No rule to make target `ntdll.dll'".
+  cd "$B" && make dlls/ntdll/arm64ec-windows/ntdll.dll
 SRC="$B/dlls/ntdll/arm64ec-windows/ntdll.dll"; OUT="$R/app/Madeira/arm64ec-windows/ntdll.dll"
 cp "$SRC" "$OUT.tmp"
 "$TC/arm64ec-w64-mingw32-strip" "$OUT.tmp"
