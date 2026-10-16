@@ -126,5 +126,16 @@ check('[map-rate] is reached only through the gate, from both note helpers',
 check('map-trace is read from madeira.cfg', 'madeira_cfg_int( "map-trace", 0 )' in src)
 check('map-trace appears in Settings', 'key: "map-trace"' in catalog)
 
+# Build fcb453c failed on exactly this: the forward declaration sat AFTER the
+# first call, so clang took an implicit non-static declaration from the call
+# and rejected the later "static" one. Cheap to assert, expensive to rediscover.
+decl = src.index('static void ios_map_note_alloc( int ok );')
+check('ios_map_note_alloc is declared before its first call',
+      decl < src.index('ios_map_note_alloc( st == STATUS_SUCCESS )'))
+check('the declaration is above NtAllocateVirtualMemory, which calls it',
+      decl < src.index('NTSTATUS WINAPI NtAllocateVirtualMemory('))
+check('ios_map_fail prints its hint as a pointer, not a ULONG_PTR',
+      'const void *hint' in fail_fn and 'ULONG_PTR hint' not in fail_fn)
+
 print('PASS' if not failures else 'FAILED: ' + '; '.join(failures))
 raise SystemExit(0 if not failures else 1)

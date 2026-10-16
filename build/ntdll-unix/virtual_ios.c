@@ -27424,6 +27424,12 @@ static NTSTATUS ios_sc_glued_pools( void **pick, SIZE_T *sz, ULONG type, ULONG p
     return STATUS_SUCCESS;
 }
 
+/* ml1216: forward declaration. It has to sit ABOVE the first call, not beside
+ * the definition: the first call is at NtAllocateVirtualMemory's exit, and an
+ * undeclared call declares the name implicitly and non-static, which then makes
+ * this "static declaration follows non-static declaration" an error. */
+static void ios_map_note_alloc( int ok );
+
 NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR zero_bits,
                                          SIZE_T *size_ptr, ULONG type, ULONG protect )
 {
@@ -28480,11 +28486,6 @@ NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR z
     return allocate_virtual_memory( ret, size_ptr, type, protect, 0, limit, 0, 0 );
 #endif
 }
-
-
-/* ml1216: forward declaration -- the first use is above, the definition sits
- * with the [map-fail] block next to NtMapViewOfSection. */
-static void ios_map_note_alloc( int ok );
 
 
 static NTSTATUS get_extended_params( const MEM_EXTENDED_PARAMETER *parameters, ULONG count,
@@ -31995,7 +31996,7 @@ static int ios_map_trace_on( void )
 }
 
 static void ios_map_fail( const char *who, unsigned int status, HANDLE handle, HANDLE process,
-                          ULONG_PTR hint, ULONG_PTR zero_bits, SIZE_T size, SIZE_T commit_size,
+                          const void *hint, ULONG_PTR zero_bits, SIZE_T size, SIZE_T commit_size,
                           const LARGE_INTEGER *offset, ULONG alloc_type, ULONG protect )
 {
     static unsigned long n;
@@ -32071,8 +32072,8 @@ NTSTATUS WINAPI NtMapViewOfSection( HANDLE handle, HANDLE process, PVOID *addr_p
     unsigned int res;
     SIZE_T mask = granularity_mask;
     LARGE_INTEGER offset;
-    /* ml1216: the caller's own words, read before *addr_ptr/*size_ptr are
-     * rounded or rewritten below. virtual_map_section writes through them. */
+    /* ml1216: the caller's own words, captured before *addr_ptr and *size_ptr are
+     * rounded or rewritten below. virtual_map_section writes through both. */
     const void *hint0 = *addr_ptr;
     const SIZE_T size0 = *size_ptr;
 
