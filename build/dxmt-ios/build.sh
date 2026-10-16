@@ -57,6 +57,20 @@ SUCCEEDED=0
 FAILED=0
 FAILED_FILES=""
 
+# A bare "FAILED" names the unit but not the reason. Every compile below sends
+# the compiler's stderr to $OBJ_DIR/<name>.err and nothing printed it, so a
+# failing run reported only "Failed: <name>" - which is not enough to act on.
+# build/ntdll-unix/build.sh already solves exactly this
+# (build/ntdll-unix/build.sh:128-147); do the same here so one run carries the
+# real compiler error instead of costing one run per question.
+report_failure() {
+    local name=$1
+    FAILED=$((FAILED+1))
+    FAILED_FILES="$FAILED_FILES $name"
+    echo "      stderr (first 40 lines; full log: $OBJ_DIR/$name.err):"
+    head -n 40 "$OBJ_DIR/$name.err" 2>/dev/null | sed 's/^/        /'
+}
+
 compile_objc() {
     local src=$1 name=$2
     # MADEIRA_ONLY=<name>: recompile one object only.
@@ -66,7 +80,7 @@ compile_objc() {
         -c "$src" -o "$OBJ_DIR/$name.o" 2>"$OBJ_DIR/$name.err"; then
         echo "OK"; SUCCEEDED=$((SUCCEEDED+1))
     else
-        echo "FAILED"; FAILED=$((FAILED+1)); FAILED_FILES="$FAILED_FILES $name"
+        echo "FAILED"; report_failure "$name"
     fi
 }
 
@@ -79,7 +93,7 @@ compile_c() {
         -c "$src" -o "$OBJ_DIR/$name.o" 2>"$OBJ_DIR/$name.err"; then
         echo "OK"; SUCCEEDED=$((SUCCEEDED+1))
     else
-        echo "FAILED"; FAILED=$((FAILED+1)); FAILED_FILES="$FAILED_FILES $name"
+        echo "FAILED"; report_failure "$name"
     fi
 }
 
@@ -92,7 +106,7 @@ compile_cxx() {
         -c "$src" -o "$OBJ_DIR/$name.o" 2>"$OBJ_DIR/$name.err"; then
         echo "OK"; SUCCEEDED=$((SUCCEEDED+1))
     else
-        echo "FAILED"; FAILED=$((FAILED+1)); FAILED_FILES="$FAILED_FILES $name"
+        echo "FAILED"; report_failure "$name"
     fi
 }
 
@@ -105,7 +119,7 @@ compile_madeira_cxx() {
         -c "$src" -o "$OBJ_DIR/$name.o" 2>"$OBJ_DIR/$name.err"; then
         echo "OK"; SUCCEEDED=$((SUCCEEDED+1))
     else
-        echo "FAILED"; FAILED=$((FAILED+1)); FAILED_FILES="$FAILED_FILES $name"
+        echo "FAILED"; report_failure "$name"
     fi
 }
 
@@ -117,7 +131,7 @@ compile_madeira_c() {
         -c "$src" -o "$OBJ_DIR/$name.o" 2>"$OBJ_DIR/$name.err"; then
         echo "OK"; SUCCEEDED=$((SUCCEEDED+1))
     else
-        echo "FAILED"; FAILED=$((FAILED+1)); FAILED_FILES="$FAILED_FILES $name"
+        echo "FAILED"; report_failure "$name"
     fi
 }
 
@@ -152,7 +166,7 @@ for cpp in BlobContainer.cpp DXBCUtils.cpp ShaderBinary.cpp; do
             -c "$DXMT_ROOT/libs/DXBCParser/$cpp" -o "$OBJ_DIR/$name.o" 2>"$OBJ_DIR/$name.err"; then
         echo "OK"; SUCCEEDED=$((SUCCEEDED+1))
     else
-        echo "FAILED"; FAILED=$((FAILED+1)); FAILED_FILES="$FAILED_FILES $name"
+        echo "FAILED"; report_failure "$name"
     fi
 done
 
