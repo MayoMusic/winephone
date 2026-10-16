@@ -17,7 +17,21 @@ B="$R/wine/build-arm64ec"
 if [ ! -f "$B/config.status" ]; then
     mkdir -p "$B" && cd "$B" && ../configure --enable-archs=arm64ec --without-x --disable-tests --enable-winegstreamer
 fi
-cd "$B" && make -C dlls/ntdll
+# Build ONLY the PE target, not the whole dlls/ntdll directory.
+  #
+  # dlls/ntdll/Makefile.in defines two independent targets from one directory:
+  # UNIXLIB = ntdll.so (the host unix library, built from unix/*.c) and
+  # MODULE = ntdll.dll (the PE module, built from the PE-side sources plus
+  # EXTRA_OBJS = unix/version.o). `make -C dlls/ntdll` builds both, and the
+  # .so link is what fails: wine/dlls/ntdll/unix/system.c:2641 calls
+  # ios_avail_phys() under #ifdef __APPLE__, and that symbol is defined only in
+  # build/ntdll-unix/virtual_ios.c, which belongs to libntdll_unix.a (the
+  # archive the app links), not to the build-time .so. So the .so link dies
+  # with "Undefined symbols for architecture arm64: _ios_avail_phys".
+  # The .so is a build byproduct and is never shipped, and the PE module does
+  # not link it, so build the PE target directly - the same pattern
+  # build-modules.sh already uses successfully for every other PE module.
+  cd "$B" && make -C dlls/ntdll/arm64ec-windows ntdll.dll
 SRC="$B/dlls/ntdll/arm64ec-windows/ntdll.dll"; OUT="$R/app/Madeira/arm64ec-windows/ntdll.dll"
 cp "$SRC" "$OUT.tmp"
 "$TC/arm64ec-w64-mingw32-strip" "$OUT.tmp"
