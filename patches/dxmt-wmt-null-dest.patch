@@ -519,10 +519,10 @@ index 3f7974e..01b0bfd 100644
    value->maximum_potential_edr_color_component_value = 1.0;
  
 diff --git a/src/winemetal/winemetal_thunks.c b/src/winemetal/winemetal_thunks.c
-index c473702..84a3f46 100644
+index c473702..3cb8f02 100644
 --- a/src/winemetal/winemetal_thunks.c
 +++ b/src/winemetal/winemetal_thunks.c
-@@ -6,8 +6,124 @@
+@@ -6,8 +6,114 @@
  
  #include "winemetal_thunks.h"
  #include <wineunixlib.h>
@@ -532,91 +532,89 @@ index c473702..84a3f46 100644
 +#include <string.h>
 +#include <stdio.h>
 +#include <stdarg.h>
++#include <pthread.h>
 +
-+/* --- logging that survives to the log file, from PE code --------------------
++/* The thread id in [wmt-fail], as a number this target can produce.
 + *
-+ * fprintf(stderr) does not survive: the guest's stdout/stderr handles can be
-+ * closed by the time a crash is reported (an at-terminate check in Run 1 saw
-+ * stderr as fd=-1), so a diagnostic written there is silently lost.
-+ *
-+ * dxmt's own WARN does survive, and it is not stderr that saves it. WARN is a
-+ * C++ macro (src/util/log/log.hpp) whose sink, src/util/log/log.cpp, resolves
-+ * __wine_dbg_output out of ntdll on first use and calls it. That is what puts
-+ * "warn: [present] ..." from d3d11_swapchain.cpp into a device log, and that
-+ * file is PE code built in this same build from this same toolchain.
-+ *
-+ * This file is C, so it cannot include log.hpp. It also cannot include
-+ * windef.h, which is where Wine declares WARN: the PE side is compiled against
-+ * the LLVM-mingw toolchain's headers, which do provide winternl.h -- so
-+ * wineunixlib.h resolves -- but windef.h is Wine's own name and is not there.
-+ * The build reported 'windef.h file not found' for <windef.h> and for
-+ * "windef.h" alike, which is what identified the toolchain as the cause.
-+ *
-+ * So the same route is implemented directly: resolve the one Wine entry point,
-+ * prefix as log.cpp does, hand it on. The three kernel32 functions are declared
-+ * rather than pulled from <windows.h>, because this file already includes
-+ * wineunixlib.h and adding windows.h beside it is a second chance for two
-+ * header sets to disagree about a type. All three come from kernel32's import
-+ * library, so this links.
-+ *
-+ * No calling convention is spelled on any of them. This DLL is built for
-+ * aarch64 and arm64ec, both of which have one ABI, so __stdcall there is
-+ * ignored -- the compiler said so -- and writing it would be a claim the target
-+ * does not honour. GetCurrentThreadId is here for the same reason as the other
-+ * two and not because the log route needs it: windef.h used to declare it, and
-+ * removing that include took the declaration with it, which the build reported
-+ * as four undeclared calls from the UNIX_CALL macro.
-+ */
-+extern void *GetModuleHandleA(const char *);
-+extern void *GetProcAddress(void *, const char *);
-+extern unsigned long GetCurrentThreadId(void);
-+
-+typedef void (*WMT_PFN_dbg_output)(const char *);
-+
-+#define WMT_PE_WARN_PREFIX "warn:  "
-+#define WMT_PE_WARN_MAX 1024
-+
-+static WMT_PFN_dbg_output wmt_pe_dbg_output(void)
++ * It was GetCurrentThreadId(), which came from windef.h and cannot link here --
++ * it is a Win32 name, and this file is native iOS (see the note below on how that
++ * was established). pthread_threadid_np gives the same kind of value on Apple
++ * platforms and is in the SDK; elsewhere the pthread itself stands in, which is
++ * still a per-thread value and still distinguishes the threads that matter for
++ * this diagnostic. Printed unsigned because %04x on a 64-bit value is only
++ * meaningful either way, and the last 32 bits are what identify a thread. */
++static unsigned long wmt_thread_id(void)
 +{
-+    /* Resolved once, unlocked. Two threads racing here both call
-+     * GetProcAddress and both store the same value, so this is benign: it can
-+     * make a diagnostic slower, never wrong. A lock would be a real
-+     * dependency on a PE-side lock this file does not otherwise have. */
-+    static WMT_PFN_dbg_output s_out;
-+    static int s_tried;
-+    if (!s_tried) {
-+        void *ntdll;
-+        s_tried = 1;
-+        ntdll = GetModuleHandleA("ntdll.dll");
-+        if (ntdll)
-+            s_out = (WMT_PFN_dbg_output)GetProcAddress(ntdll, "__wine_dbg_output");
-+    }
-+    return s_out;
++#if defined(__APPLE__)
++    uint64_t tid = 0;
++    pthread_threadid_np(NULL, &tid);
++    return (unsigned long)tid;
++#else
++    return (unsigned long)pthread_self();
++#endif
 +}
 +
-+/* Whether the route exists, so a caller can tell "printed" from "lost" rather
-+ * than assuming. The self-test reports this instead of claiming success. */
++/* --- logging that survives to the log file, from this side -------------------
++ *
++ * The earlier assumption here was that this file runs as a Windows DLL under
++ * Wine, where the guest's stderr can be closed by the time a crash is reported
++ * (an at-terminate check in Run 1 saw stderr as fd=-1) and a diagnostic written
++ * there is lost. The link map says otherwise, and it is the stronger evidence:
++ *
++ *   - build/dxmt-ios/build.sh:282 compiles this file with compile_madeira_c,
++ *     i.e. `xcrun -sdk iphoneos clang -arch arm64 -std=c11`. It is native iOS
++ *     code, not a PE image.
++ *   - The app link then failed with _GetModuleHandleA, _GetProcAddress and
++ *     _GetCurrentThreadId undefined, referenced from winemetal_thunks.o inside
++ *     libdxmt_combined.a. Those are Win32 names with no counterpart on this
++ *     target and no import library here to resolve them from.
++ *
++ * So stderr in this file is the host's own stderr, and the native side already
++ * writes to it: dprintf(2, "[mach_exc] ...") appears throughout the device logs.
++ * That is also how dxmt's own Logger reaches a log on this platform -- log.cpp
++ * guards its ntdll lookup with #ifdef _WIN32, so on iOS m_wineLogOutput stays
++ * null and emitMsg falls back to std::cerr, which is what puts
++ * "warn: [present] ..." from d3d11_swapchain.cpp into the log.
++ *
++ * The wine log macros are deliberately NOT used here. ERR/WARN/TRACE/FIXME all
++ * end in __wine_dbg_output, which reads thread-local state and faults on a
++ * thread that has no wine TEB; build/ntdll-unix/virtual_ios.c records it killing
++ * two runs (ml370, ml374) precisely by being reached from a fault path. A file
++ * whose job is to describe faults has no business calling the thing that faults.
++ *
++ * The prefix is "wmt: " and not "warn: " so these lines are greppable in a log
++ * that also carries dxmt's own warnings, and distinguishable from them.
++ */
++#define WMT_LOG_PREFIX "wmt: "
++#define WMT_LOG_MAX 1024
++
++/* Whether the route is usable, so a caller can tell "printed" from "lost"
++ * instead of assuming. The self-test reports this rather than claiming success.
++ * It says stderr is open, not that the line reached a file: only whoever reads
++ * the log can tell that, and a line that claims more than it knows is how a
++ * missing diagnostic comes to be read as evidence that there was nothing to
++ * report. */
 +static int wmt_pe_log_route_ok(void)
 +{
-+    return wmt_pe_dbg_output() != NULL;
++    return stderr != NULL;
 +}
 +
-+/* Assembles one line and hands it to Wine's log. Returns 1 if it got there.
++/* Assembles one line and writes it. Returns 1 if it was handed to stderr.
 + *
-+ * Every format string in this file is a literal with at most six numeric
-+ * fields, so nothing here approaches the 1024-byte body; a line that somehow
-+ * did is marked "[truncated]" rather than silently cut, because a diagnostic
-+ * that stops halfway is worse than one that says it stopped. */
++ * Every format string in this file is a literal with at most six numeric fields,
++ * so nothing here approaches the 1024-byte body; a line that somehow did is
++ * marked "[truncated]" rather than silently cut, because a diagnostic that stops
++ * halfway reads as a complete one. Written in four pieces rather than assembled
++ * into one buffer, so there is no length arithmetic to get wrong and no
++ * intermediate buffer to truncate twice. */
 +static int wmt_pe_warn(const char *fmt, ...)
 +{
-+    char body[WMT_PE_WARN_MAX];
-+    char line[WMT_PE_WARN_MAX + 32];
-+    size_t off, n;
++    char body[WMT_LOG_MAX];
++    size_t n;
 +    va_list args;
-+    WMT_PFN_dbg_output out = wmt_pe_dbg_output();
 +    int written;
 +
-+    if (!out)
++    if (stderr == NULL)
 +        return 0;
 +
 +    va_start(args, fmt);
@@ -624,22 +622,14 @@ index c473702..84a3f46 100644
 +    va_end(args);
 +    if (written < 0)
 +        return 0;
-+    n = (size_t)written < sizeof(body) ? (size_t)written : sizeof(body) - 1;
++    n = strlen(body);
++
++    fwrite(WMT_LOG_PREFIX, 1, sizeof(WMT_LOG_PREFIX) - 1, stderr);
++    fwrite(body, 1, n, stderr);
 +    if ((size_t)written >= sizeof(body))
-+        n = strlen(body);
-+
-+    off = sizeof(WMT_PE_WARN_PREFIX) - 1;
-+    memcpy(line, WMT_PE_WARN_PREFIX, off);
-+    memcpy(line + off, body, n);
-+    off += n;
-+    if ((size_t)written >= sizeof(body)) {
-+        memcpy(line + off, " [truncated]", 13);
-+        off += 13;
-+    }
-+    line[off++] = '\n';
-+    line[off] = '\0';
-+
-+    out(line);
++        fwrite(" [truncated]", 1, 13, stderr);
++    fwrite("\n", 1, 1, stderr);
++    fflush(stderr);
 +    return 1;
 +}
 +
@@ -649,7 +639,7 @@ index c473702..84a3f46 100644
  
  /* ml761: top-level API census.
   *
-@@ -39,12 +155,46 @@ extern void wmt_api_census_note(unsigned code);
+@@ -39,12 +145,46 @@ extern void wmt_api_census_note(unsigned code);
    {                                                                                                                    \
      wmt_api_census_note(code);                                                                                         \
      NTSTATUS status = WINE_UNIX_CALL(code, params);                                                                    \
@@ -662,7 +652,7 @@ index c473702..84a3f46 100644
 +     * the facility bits make the signed form read as negative. */              \
 +    if (status) {                                                                                                      \
 +      WARN("[wmt-fail] status=0x%08x api=%s(%u) tid=%04x", (unsigned)status,       \
-+           (code < WMT_API_COUNT ? wmt_api_names[code] : "?"), code, GetCurrentThreadId());                            \
++           (code < WMT_API_COUNT ? wmt_api_names[code] : "?"), code, wmt_thread_id());                            \
 +      assert(!status && "unix call failed");                                                                             \
 +    }                                                                                                                  \
    }
@@ -697,7 +687,7 @@ index c473702..84a3f46 100644
  WINEMETAL_API void
  NSObject_retain(obj_handle_t obj) {
    UNIX_CALL(0, &obj);
-@@ -112,10 +262,27 @@ MTLDevice_name(obj_handle_t device) {
+@@ -112,10 +252,27 @@ MTLDevice_name(obj_handle_t device) {
  WINEMETAL_API uint32_t
  NSString_getCString(obj_handle_t str, char *buffer, uint64_t maxLength, enum WMTStringEncoding encoding) {
    struct unixcall_nsstring_getcstring params;
@@ -725,7 +715,7 @@ index c473702..84a3f46 100644
    UNIX_CALL(8, &params);
    return params.ret;
  }
-@@ -230,6 +397,24 @@ MTLDevice_newDepthStencilState(obj_handle_t device, const struct WMTDepthStencil
+@@ -230,6 +387,24 @@ MTLDevice_newDepthStencilState(obj_handle_t device, const struct WMTDepthStencil
  WINEMETAL_API obj_handle_t
  MTLDevice_newTexture(obj_handle_t device, struct WMTTextureInfo *info) {
    struct unixcall_mtldevice_newtexture params;
@@ -750,7 +740,7 @@ index c473702..84a3f46 100644
    params.device = device;
    WMT_MEMPTR_SET(params.info, info);
    UNIX_CALL(21, &params);
-@@ -730,6 +915,16 @@ MetalLayer_setProps(obj_handle_t layer, const struct WMTLayerProps *props) {
+@@ -730,6 +905,16 @@ MetalLayer_setProps(obj_handle_t layer, const struct WMTLayerProps *props) {
  WINEMETAL_API void
  MetalLayer_getProps(obj_handle_t layer, struct WMTLayerProps *props) {
    struct unixcall_generic_obj_ptr_noret params;
@@ -767,7 +757,7 @@ index c473702..84a3f46 100644
    params.handle = layer;
    WMT_MEMPTR_SET(params.arg, props);
    UNIX_CALL(71, &params);
-@@ -791,6 +986,16 @@ MTLCommandBuffer_logs(obj_handle_t cmdbuf) {
+@@ -791,6 +976,16 @@ MTLCommandBuffer_logs(obj_handle_t cmdbuf) {
  WINEMETAL_API uint64_t
  MTLLogContainer_enumerate(obj_handle_t logs, uint64_t start, uint64_t buffer_size, obj_handle_t *buffer) {
    struct unixcall_enumerate params;
@@ -784,7 +774,7 @@ index c473702..84a3f46 100644
    params.enumeratable = logs;
    params.start = start;
    params.buffer_size = buffer_size;
-@@ -838,6 +1043,14 @@ WMTGetSecondaryDisplayId() {
+@@ -838,6 +1033,14 @@ WMTGetSecondaryDisplayId() {
  WINEMETAL_API void
  WMTGetDisplayDescription(uint32_t display_id, struct WMTDisplayDescription *desc) {
    struct unixcall_generic_obj_ptr_noret params;
@@ -799,7 +789,7 @@ index c473702..84a3f46 100644
    params.handle = display_id;
    WMT_MEMPTR_SET(params.arg, desc);
    UNIX_CALL(96, &params);
-@@ -845,7 +1058,20 @@ WMTGetDisplayDescription(uint32_t display_id, struct WMTDisplayDescription *desc
+@@ -845,7 +1048,20 @@ WMTGetDisplayDescription(uint32_t display_id, struct WMTDisplayDescription *desc
  
  WINEMETAL_API void
  MetalLayer_getEDRValue(obj_handle_t layer, struct WMTEDRValue *value) {

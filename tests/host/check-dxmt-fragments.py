@@ -109,7 +109,7 @@ else:
     # PE file got through to a build: windef.h, and then, after that was
     # "fixed" wrongly, an include the toolchain does not have. It is compiled
     # here too, and needs no Wine header -- it declares what it uses.
-    m = re.search(r"(extern void \*GetModuleHandleA.*?"
+    m = re.search(r"(static unsigned long wmt_thread_id\(void\).*?"
                   r"#define WARN\(\.\.\.\) wmt_pe_warn\(__VA_ARGS__\))",
                   added_text, re.S)
     if m:
@@ -119,7 +119,7 @@ else:
         # count right and compiles less, which is exactly the shape of check
         # that passes while inspecting nothing.
         check("the PE logging block was found to compile", False,
-              "no match for GetModuleHandleA .. #define WARN in the added lines; "
+              "no match for wmt_thread_id .. #define WARN in the added lines; "
               "the extractors have fallen behind the patch")
         pieces.append("")
 
@@ -131,7 +131,7 @@ else:
     # patch at all.
     #
     # Read from the real source when dxmt is here; otherwise a stand-in carrying
-    # the same dependency, which says so. Either way GetCurrentThreadId is not
+    # the same dependency, which says so. Either way wmt_thread_id is not
     # stubbed: the declaration has to come from the added lines, and that is the
     # thing being checked.
     unix_call = ""
@@ -153,7 +153,7 @@ else:
                     break
                 _end = _nxt
             _body = _h[_pos:_end]
-            if "GetCurrentThreadId" in _body:
+            if "wmt_thread_id" in _body:
                 unix_call = _body
                 break
             _pos = _h.find("#define UNIX_CALL", _pos + 1)
@@ -165,7 +165,7 @@ else:
             '#define UNIX_CALL(code, params) \\\n'
             '  wmt_pe_warn("[wmt-fail] status=0x%08x api=%s(%u) tid=%04x", 0, \\\n'
             '             (code < WMT_API_COUNT ? wmt_api_names[code] : "?"), \\\n'
-            '             (unsigned)(code), (unsigned)GetCurrentThreadId())\n')
+            '             (unsigned)(code), (unsigned)wmt_thread_id())\n')
     elif os.path.exists(_src_file):
         unix_call_from = "dxmt/src/winemetal/winemetal_thunks.c"
     else:
@@ -173,7 +173,7 @@ else:
     check("the UNIX_CALL macro is compiled at a call site", unix_call != "",
           "from %s; it is context, not an added line, so no piece contains it"
           % unix_call_from)
-    # What the macro needs around its kernel32 call. GetCurrentThreadId is
+    # What the macro needs around its own call. wmt_thread_id is
     # deliberately absent: if nothing declares it, the compile below fails, which
     # is the entire reason the macro is here.
     unix_call_stubs = (
@@ -291,11 +291,20 @@ else:
 
         hdrs_common = ('#include <stdint.h>\n#include <stddef.h>\n'
                        '#include <stdarg.h>\n')
+        # pthread is what wmt_thread_id() calls. Real header where there is one,
+        # declared where there is not, with the signatures the added code uses:
+        # pthread_self() for the non-Apple branch and pthread_threadid_np() for
+        # the Apple one, whose second argument is uint64_t* in the code.
+        hdrs_pthread = '#include <pthread.h>\n'
+        stub_pthread = (
+            'unsigned long pthread_self(void);\n'
+            'int pthread_threadid_np(const void *, uint64_t *);\n')
         stub_c = (
             'typedef struct { int dummy; } FILE;\n'
             'typedef __SIZE_TYPE__ wmt_size_t;\n'
             'FILE *fopen(const char *, const char *);\n'
             'size_t fwrite(const void *, size_t, size_t, FILE *);\n'
+            'int fflush(FILE *);\n'
             'int fclose(FILE *);\n'
             'int fprintf(FILE *, const char *, ...);\n'
             'int snprintf(char *, size_t, const char *, ...);\n'
@@ -311,7 +320,8 @@ else:
 
         tu_c = (
             (hdrs_common + '#include <stdio.h>\n#include <string.h>\n'
-             if have_libc else hdrs_common + stub_c)
+             + hdrs_pthread
+             if have_libc else hdrs_common + stub_c + stub_pthread)
             + 'typedef unsigned long obj_handle_t;\n'
             'enum WMTBlitCommandType { WMTBlitCommandCopyFromTextureToBuffer,\n'
             '  WMTBlitCommandCopyFromTextureToTexture, WMTBlitCommandMax };\n'
@@ -359,9 +369,13 @@ else:
             # differ on exactly the implicit-declaration rule that let
             # GetCurrentThreadId through.
             #
-            # What this is NOT: a build for arm64 against the iPhoneOS SDK. That
-            # needs the macOS runner and happens in the dxmt-ios stage; this
-            # stands in for it only for the declarations the patch adds.
+            # What this is NOT: a build for arm64 against the iPhoneOS SDK, and
+            # not a link either. That needs the macOS runner and is the dxmt-ios
+            # stage plus the app link. The link is where the last class of error
+            # showed up -- declarations that compile perfectly and have no
+            # definition on the target -- and nothing here can see it; see the
+            # Win32-name assertion above for the part of that which is checkable
+            # without a link.
             cflags = [cc, "-fsyntax-only", "-x", "c", "-std=c11", "-Wall",
                       "-Werror=implicit-function-declaration",
                       "-Wno-unused-parameter", "-Wno-missing-field-initializers",
@@ -403,6 +417,22 @@ for _chunk in re.split(r"(?m)^diff --git ", text):
               'extern "C"' not in _code,
               "a .c is compiled as C; `extern \"C\"` is a syntax error there and "
               "the build cannot see it until it compiles the file")
+        # The class of error only a link can find: a name that compiles, has no
+        # declaration, and has no definition on the target either. Declaring
+        # GetModuleHandleA, GetProcAddress and GetCurrentThreadId by hand made
+        # this file compile cleanly -- and the app link then failed on all three
+        # as undefined, because they are Win32 names and this file is compiled
+        # for iOS (build/dxmt-ios/build.sh:282, compile_madeira_c) and linked into
+        # the app. A syntax check cannot see that. Naming the ones this target
+        # does not have can be checked, so it is.
+        _win32 = re.findall(r"\b(GetProcAddress|GetModuleHandle[AW]|"
+                            r"GetCurrentThreadId|VirtualAlloc|VirtualFree|"
+                            r"LoadLibrary[AW]?|GetProcAdd|HeapAlloc)\b", _code)
+        check("%s names no Win32-only symbol it cannot link" % _path,
+              not _win32,
+              "found: " + ", ".join(sorted(set(_win32))) if _win32 else
+              "a Win32 name compiles and then fails at link with nothing on the "
+              "target to define it")
     elif _path.endswith(".cpp"):
         check("%s is the C++ side, as compiled" % _path, True)
 
