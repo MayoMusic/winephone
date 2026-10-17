@@ -1,25 +1,55 @@
 # D3D12 on iOS: what this build provides, and what it does not
 
-**Status: the D3D12 backend is incomplete here, by two independent gaps. This
-is a statement about *this* graphics path, not about D3D12 in general.** What
-has *not* been ruled out is listed at the end.
+**Status: UNRESOLVED. Neither gap is closed, and the policy prohibition stands.**
+The D3D12 backend is incomplete here, by two independent gaps. This is a
+statement about *this* graphics path, not about D3D12 in general. What has *not*
+been ruled out is listed at the end.
 
 Everything below is re-derived by `tools/d3d12-backend-probe.py`, which exits
 non-zero while either gap is open. Run it before repeating any of it.
 
 ## The claim this replaces
 
-`COMPAT.md` recorded CONTROL as **Unsupported-API** on two grounds, both of
-which are wrong:
+`COMPAT.md` recorded CONTROL as **Unsupported-API** on two grounds, and this
+document has to correct the record twice over.
 
-> "D3D12 is excluded from this tree for licensing and `scripts/build-ipa.sh`
-> rejects an IPA containing the converter."
+The first version of this document said `scripts/build-ipa.sh` had no D3D12 rule
+and therefore none existed. That grep was literally true and materially
+misleading: **the rule exists, enforced in code, fail-closed** —
+`tools/validate_release_inputs.py`, which `scripts/build-ipa.sh:200` runs on
+every build:
 
-`scripts/build-ipa.sh` contains no such rule — `grep -i 'd3d12\|d3dmetal\|shader
-converter' scripts/build-ipa.sh` returns nothing. And D3D12 is not excluded:
-`app/Madeira/aarch64-windows/d3d12.dll` is a full Wine implementation, 458,752
-bytes, 33 imports. The reason is not licensing. It is that the two things this
-implementation needs are both missing.
+```python
+for forbidden in ("x86_64-vcruntime", "libmetalirconverter", "d3d12"):
+    if forbidden.casefold() in project.casefold():
+        raise SystemExit(f"forbidden app resource reference remains: {forbidden}")
+
+for name in ("libmetalirconverter.dylib", "d3d12core.dll", "madeira_d3d12.dll"):
+    matches = [p for p in app.rglob(name) if p.is_file()]
+    if matches:
+        raise SystemExit("prohibited D3D12 release inputs remain: ...")
+```
+
+So Microsoft's D3D12Core / Agility SDK and Apple's Metal Shader Converter are
+**prohibited release inputs**, and a build that ships either fails. That is a
+project decision with teeth, not a gap.
+
+What `scripts/build-ipa.sh` really does is *copy only four dxmt modules* — see
+Gap 1. Those are different facts and the second version of this document
+conflated them.
+
+Wine's own `d3d12.dll` is **not** on the forbidden list, which is why the
+`aarch64-windows` copy sits in the repo and passes validation. So the position
+is narrower than "D3D12 is banned":
+
+| D3D12 implementation | status here |
+|---|---|
+| Microsoft D3D12Core / Agility SDK (`d3d12core.dll`) | **prohibited**, enforced by the validator |
+| Apple Metal Shader Converter (`libmetalirconverter.dylib`) | **prohibited**, enforced by the validator |
+| Wine `d3d12.dll` over vkd3d | not prohibited, but **incomplete** — the two gaps below |
+
+CONTROL Resonant ships the first. So it is blocked by policy *and* would not
+work if the policy allowed it.
 
 ## Gap 1 — the shipped payload has no `d3d12.dll` at all
 
@@ -128,15 +158,15 @@ the evidence shows.
 
 **Not ruled out, and the obvious one: a real Vulkan→Metal translation layer.**
 This is what closes Gap 2, and nothing in the project's constraints forbids it
-— MoltenVK is MIT-licensed, not Apple's D3DMetal or GPTK, and not the Metal
-Shader Converter. It is absent, and it is a substantial dependency (a new
-runtime in the IPA, a licensing entry in `THIRD-PARTY-NOTICES.md`, and DXIL
-shader paths that would need checking against DXMT's). **It has not been tried
-and no claim is made about whether it would work.**
+— MoltenVK is MIT-licensed, not Apple's `libmetalirconverter.dylib`, and not on
+the validator's forbidden list. It is absent, and it is a substantial dependency
+(a new runtime in the IPA, a licensing entry in `THIRD-PARTY-NOTICES.md`, and
+DXIL shader paths that would need checking against DXMT's). **It has not been
+tried and no claim is made about whether it would work.**
 
-**Not ruled out: shipping `d3d12.dll` for arm64ec.** Closing Gap 1 is a
-`meson` target and one more line in the `build-ipa.sh` loop. That alone still
-leaves Gap 2 — it turns `STATUS_DLL_NOT_FOUND` into `VK_ERROR_INCOMPATIBLE_DRIVER`.
+**Not ruled out: shipping `d3d12.dll` for arm64ec.** Closing Gap 1 is a `meson`
+target and one more line in the `build-ipa.sh` loop. That alone still leaves
+Gap 2 — it turns `STATUS_DLL_NOT_FOUND` into `VK_ERROR_INCOMPATIBLE_DRIVER`.
 
 **Not ruled out: a D3D12→D3D11 translation layer** (Microsoft's D3D12 mapping
 layer, or an equivalent). Does not exist in this tree. It is the route that
@@ -144,10 +174,11 @@ would actually give a D3D12-only title a fallback, at the cost of feature
 coverage — ray tracing, resource binding tier 1 and enhanced barriers do not
 map.
 
-**Excluded by project policy, not by evidence: Apple's D3DMetal / GPTK and the
-Metal Shader Converter.** These are prohibited by this project's own rules, so
-their absence here is a decision. Their feasibility has not been evaluated and
-this document makes no claim about it.
+**Prohibited by project policy, with the rule enforced in code:** Microsoft's
+D3D12Core / Agility SDK and Apple's Metal Shader Converter. CONTROL Resonant
+needs the first. Their feasibility was never evaluated and this document makes
+no claim about it — they are excluded by `tools/validate_release_inputs.py`, and
+that is the whole of the reason.
 
 **Settled:** a Vulkan-using title with a D3D11 fallback works today, which is
 what the stub was built for and what the ROTTR main menu demonstrates.

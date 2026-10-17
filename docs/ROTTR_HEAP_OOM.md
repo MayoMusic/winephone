@@ -1,7 +1,13 @@
 # ROTTR: the level-load "Out of memory", and why it is not ours
 
-**Status: open, and outside this tree.** Everything below is measured on a
-device run, and the conclusion is that the host never refused anything.
+**Status: UNRESOLVED. Not fixed, and not fixable from this tree.** The game
+still aborts on the first level load. Everything below is measured on a device
+run, and the conclusion is that the host never refused anything.
+
+**No claim is made that the level load now works.** Nothing in this repository
+changes the outcome: the refusal is inside the game's own allocator, and no
+setting, entitlement or host allocation change reaches it. What follows
+establishes *that* it is not ours, which is a different thing from fixing it.
 
 ## The failure
 

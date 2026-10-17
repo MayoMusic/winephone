@@ -25,6 +25,7 @@ this can gate a claim. It never reports a game as playable; it reports which
 backend that game's imports require and whether this build completes it.
 """
 import os
+import re
 import struct
 import sys
 
@@ -194,12 +195,35 @@ def main():
     stubbed = os.path.exists(stub) and "vulkan-1" in open(stub, encoding="utf-8",
                                                         errors="replace").read()
 
+    # What the project PROHIBITS, which is a different fact from what is
+    # missing: tools/validate_release_inputs.py fails the build on these, and
+    # build-ipa.sh runs it on every build. Read the list out of the validator
+    # rather than repeating it here, so the two cannot drift.
+    validator = os.path.join(ROOT, "tools", "validate_release_inputs.py")
+    prohibited = []
+    if os.path.exists(validator):
+        vtext = open(validator, encoding="utf-8", errors="replace").read()
+        m = re.search(r'for name in \(([^)]*)\):', vtext)
+        if m:
+            names = re.findall(r'"([^"]+)"', m.group(1))
+            for n in names:
+                hits = [os.path.relpath(os.path.join(dp, f), ROOT)
+                        for dp, _dn, fn in os.walk(os.path.join(ROOT, "app", "Madeira"))
+                        for f in fn if f == n]
+                print("  prohibited input present: %s -> %s" % (n, ", ".join(hits) or "none"))
+                if hits:
+                    prohibited.append(n)
+
     shipped_d3d12 = os.path.exists(os.path.join(SHIPPED, "d3d12.dll"))
     complete = bool(drivers)
     print("\n== verdict ==")
     print("  shipped payload:    %s" % os.path.relpath(SHIPPED, ROOT))
     print("  d3d12.dll there:    %s" % ("present" if shipped_d3d12 else "ABSENT"))
     print("  Vulkan device:      %s" % ("present" if complete else "ABSENT"))
+    print("  prohibited inputs:  %s" % (", ".join(prohibited) if prohibited
+                                        else "none present (MS D3D12Core and Apple's"
+                                             " metalirconverter are refused by"
+                                             " validate_release_inputs.py)"))
     print("  ICD registry key:   %s"
           % ("set in " + ", ".join(icd_setup) if icd_setup else "never set"))
     if stubbed and not complete:
@@ -215,6 +239,11 @@ def main():
         print("  Gap 2 of 2: no Vulkan driver. Wine's d3d12 is a vkd3d front end")
         print("  over Vulkan, and the stub answers VK_ERROR_INCOMPATIBLE_DRIVER, so")
         print("  vkd3d has no device to talk to.")
+    print("  Policy, separate from both: Microsoft's D3D12Core/Agility SDK and")
+    print("  Apple's metalirconverter are PROHIBITED release inputs --")
+    print("  validate_release_inputs.py fails the build on them. A title that")
+    print("  ships the Agility SDK is blocked by policy regardless of the gaps")
+    print("  above, and those gaps would still stop it if the policy allowed it.")
     print("  Scope: this says the D3D12 BACKEND IS INCOMPLETE HERE. It is not a")
     print("  claim about D3D12 in general -- docs/D3D12_BACKEND.md lists what has")
     print("  not been ruled out and what would close each gap.")
