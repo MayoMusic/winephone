@@ -1,13 +1,18 @@
 # Compatibility status
 
-No game has been run by WinePhone. No IPA has been built. Every row below is a
-**static analysis of the user's own installed binaries**, not a test result.
-Do not treat Madeira's title reports or the project brief's estimates as
-WinePhone results either.
+WinePhone builds and runs. The first recorded device run is Rise of the Tomb
+Raider on iPhone18,3 / iOS 27.0.1: it **reaches the main menu** and then, on the
+first level load, aborts inside its own allocator. That abort is measured and
+ruled out as ours — `docs/ROTTR_HEAP_OOM.md`.
 
-Machine-readable placeholder records and schema live in `compat/catalog.json`.
-All statuses remain untested until a run is recorded with device, OS, build
-commit, profile, logs, FPS/frame-time method, and test duration.
+Every other row below is still a **static analysis of the user's own installed
+binaries**, not a test result. Do not treat Madeira's title reports or the
+project brief's estimates as WinePhone results either.
+
+Machine-readable records and schema live in `compat/catalog.json`. A status other
+than **Untested** requires a recorded run with device, OS, build commit,
+profile, logs, FPS/frame-time method, and test duration — the ROTTR entry is the
+one that has all of them.
 
 Status vocabulary: **Untested** (analysed, never run) · **Unsupported-API**
 (needs a graphics API this tree does not provide) · **Unsupported-DRM** (must
@@ -21,7 +26,7 @@ Analysis method and full evidence: `docs/GAME_IMPORT_ANALYSIS.md`
 
 | Title | Arch | Renderer | Status | Basis |
 |---|---|---|---|---|
-| Rise of the Tomb Raider | x86-64 PE32+ | **D3D11 primary**, D3D12 opt-in | **Untested — recommended first test** | Executable carries 4 `d3d11.dll` and 2 `dxgi.dll` references and a complete `PCDX11*` class hierarchy; ships `d3dcompiler_47.dll`, so DXBC is compiled at run time, which is the path DXMT implements. `DX12` exists as a standalone token while `DX11` does not, reading as D3D11-by-default with D3D12 opt-in, so the per-game profile must not pass `DX12`. |
+| Rise of the Tomb Raider | x86-64 PE32+ | **D3D11 primary**, D3D12 opt-in | **Menu** | Recorded run, `compat/catalog.json`. Builds DXMT (Apple A19 GPU, feature level 11_0, BC textures), creates its 1280×720 window and a Metal layer, reaches the main menu. The first level load then aborts in the game's own allocator — not a host refusal, not fragmentation, not RAM: `docs/ROTTR_HEAP_OOM.md`. Static basis: 4 `d3d11.dll` and 2 `dxgi.dll` references, a complete `PCDX11*` hierarchy, and `d3dcompiler_47.dll`, so DXBC is compiled at run time, which is the path DXMT implements. The per-game profile must not pass `DX12`. |
 | CONTROL Resonant | x86-64 PE32+ | **D3D12 only** | **Unsupported-API** | Ships the Agility SDK (`D3D12Core.dll`, 6 `d3d12` references) and **no** component references `d3d11.dll`, with DLSS, FSR, NRD, NRI and PhysX around it. D3D12 is excluded from this tree for licensing and `scripts/build-ipa.sh` rejects an IPA containing the converter. |
 
 Both binaries set **Control Flow Guard** and request **HIGH_ENTROPY_VA**. The
@@ -50,7 +55,30 @@ binary this is the only one with a hard-coded size of 32 MB or more - the other
 14 take their size from a register. Because `MEM_RESERVE` commits nothing, the
 reservation is an address-space problem, not a RAM problem: see
 `docs/MEMORY_ENTITLEMENTS.md`. `tools/rotrr-heap-patch.py` lowers the constant.
-**Not yet tested on a device.**
+
+**Patched and verified on device.** At 768 MB the reservation succeeds:
+
+```
+[bigres] tid=007c #1 size=0x30000000 (768 MB) type=0x2000 prot=0x4
+[guest-reserve] #1 0x7138010000+0x30000000 hinted=0 running_total=768MB
+```
+
+It does not need the 768 MB: the FEX arena's 4 GB already ends at `0x7138010000`
+and the band ceiling is `0x7180000000`, so 1152 MB is free above the arena and
+the reservation would fit at a much larger size too. `jumbo-mb` should therefore
+match the patched request rather than the original 3072.
+
+Two things about it that are worth not re-learning:
+
+- `VirtualAlloc(NULL, ...)` never fails on this device, because `VM_FLAGS_ANYWHERE`
+  finds somewhere in the 454 GB map. A game that spreads its arena out is not
+  stopped by the ceiling it was told about; it is stopped by fragmentation it
+  created itself, which is what the level-load abort turned out to be.
+- The 16 `[range-probe]` lines in that run show every slot Wine *preferred*
+  (`0x7c…`, `0x74…`) sitting above the task ceiling, which is why the
+  allocation fell back to hint 0 and landed inside the FEX arena instead.
+
+The level-load abort that replaced this failure is `docs/ROTTR_HEAP_OOM.md`.
 
 Rise of the Tomb Raider ships its own `msvcp140.dll`, `vcruntime140.dll` and
 `vcruntime140_1.dll`, so it needs no user-supplied Microsoft redistributable.
