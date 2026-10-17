@@ -19,14 +19,19 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PATCH_DIR="$ROOT/patches"
 fails=0
+skipped=0
 
 for patch in "$PATCH_DIR"/dxmt-*.patch; do
   name="$(basename "$patch")"
   tree="$ROOT/dxmt"
   if [[ ! -e "$tree/.git" ]]; then
-    echo "FAIL $name: dxmt is not checked out, so it cannot be verified here"
-    echo "     (this check needs the submodule; CI runs it after bootstrap)"
-    fails=$((fails + 1))
+    # Not a failure. The host-checks job checks out no submodules, and this is
+    # where it runs; the same verification happens for real in the build job's
+    # submodule-patches stage, which applies them against the pinned tree and
+    # stops the build. Said out loud rather than passed over, so nobody reads a
+    # skipped check as a passing one.
+    echo "skip $name: dxmt is not checked out here, so it was not verified by this check"
+    skipped=$((skipped + 1))
     continue
   fi
   pin="$(git -C "$tree" rev-parse --short HEAD)"
@@ -69,5 +74,11 @@ for entry in "fex-darwin.patch:FEX" "0001-winephone-build-exclusions.patch:."; d
 done
 
 echo
+if [[ $skipped -gt 0 ]]; then
+  echo "note: $skipped patch(es) were NOT verified by this check -- dxmt is not"
+  echo "      checked out in this job. They are verified for real by the"
+  echo "      submodule-patches build stage, which applies them and fails the"
+  echo "      build if either direction fails."
+fi
 if [[ $fails -eq 0 ]]; then echo PASS; else echo "FAILED: $fails"; fi
 exit $fails
