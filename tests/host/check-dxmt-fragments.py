@@ -125,13 +125,84 @@ else:
     # PE file got through to a build: windef.h, and then, after that was
     # "fixed" wrongly, an include the toolchain does not have. It is compiled
     # here too, and needs no Wine header -- it declares what it uses.
-    m = re.search(r"(extern void \*__stdcall GetModuleHandleA.*?"
+    m = re.search(r"(extern void \*GetModuleHandleA.*?"
                   r"#define WARN\(\.\.\.\) wmt_pe_warn\(__VA_ARGS__\))",
                   added_text, re.S)
     if m:
         pieces.append(m.group(1))
     else:
-        pieces.append("")   # keep the count honest rather than compiling less
+        # A named failure, not a silent empty string. An empty piece keeps the
+        # count right and compiles less, which is exactly the shape of check
+        # that passes while inspecting nothing.
+        check("the PE logging block was found to compile", False,
+              "no match for GetModuleHandleA .. #define WARN in the added lines; "
+              "the extractors have fallen behind the patch")
+        pieces.append("")
+
+    # The UNIX_CALL macro, compiled at a call site. Every diagnostic in this file
+    # rides on it, and it names a kernel32 function that windef.h used to
+    # declare: removing that include took the declaration with it and the build
+    # reported four undeclared calls. Nothing else here would have caught it --
+    # the macro is neither an added line nor near a hunk, so it is not in the
+    # patch at all.
+    #
+    # Read from the real source when dxmt is here; otherwise a stand-in carrying
+    # the same dependency, which says so. Either way GetCurrentThreadId is not
+    # stubbed: the declaration has to come from the added lines, and that is the
+    # thing being checked.
+    unix_call = ""
+    unix_call_from = ""
+    _src_file = os.path.join(ROOT, "dxmt", "src", "winemetal", "winemetal_thunks.c")
+    _haystacks = []
+    if os.path.exists(_src_file):
+        _haystacks.append(open(_src_file, encoding="utf-8", errors="replace").read())
+    else:
+        _haystacks.append(text)   # may not contain it; the stand-in covers it
+    for _h in _haystacks:
+        _pos = _h.find("#define UNIX_CALL")
+        while _pos >= 0:
+            _end = _h.find("\n", _pos)
+            while _h[_end - 1:_end].rstrip() == "\\" or _h[max(0, _end - 2):_end].endswith("\\\n"):
+                _nxt = _h.find("\n", _end + 1)
+                if _nxt < 0:
+                    _end = len(_h)
+                    break
+                _end = _nxt
+            _body = _h[_pos:_end]
+            if "GetCurrentThreadId" in _body:
+                unix_call = _body
+                break
+            _pos = _h.find("#define UNIX_CALL", _pos + 1)
+        if unix_call:
+            break
+    if not unix_call:
+        unix_call_from = "stand-in"
+        unix_call = (
+            '#define UNIX_CALL(code, params) \\\n'
+            '  wmt_pe_warn("[wmt-fail] status=0x%08x api=%s(%u) tid=%04x", 0, \\\n'
+            '             (code < WMT_API_COUNT ? wmt_api_names[code] : "?"), \\\n'
+            '             (unsigned)(code), (unsigned)GetCurrentThreadId())\n')
+    elif os.path.exists(_src_file):
+        unix_call_from = "dxmt/src/winemetal/winemetal_thunks.c"
+    else:
+        unix_call_from = "the patch (unlikely; assert if this surprises you)"
+    check("the UNIX_CALL macro is compiled at a call site", unix_call != "",
+          "from %s; it is context, not an added line, so no piece contains it"
+          % unix_call_from)
+    # What the macro needs around its kernel32 call. GetCurrentThreadId is
+    # deliberately absent: if nothing declares it, the compile below fails, which
+    # is the entire reason the macro is here.
+    unix_call_stubs = (
+        '\ntypedef long NTSTATUS;\n'
+        '#define WINE_UNIX_CALL(code, params) ((NTSTATUS)0)\n'
+        '#define WMT_API_COUNT 1\n'
+        'static const char *wmt_api_names[1] = { "?" };\n'
+        'static void wmt_api_census_note(unsigned) {}\n'
+        # assert is the macro's own use, from the <assert.h> the file includes.
+        # Stubbed to a no-op because what is under test is what the names
+        # resolve to, not whether the assert fires.
+        '#define assert(x) ((void)0)\n'
+        'static void wmt_probe_unix_call(void *o) { UNIX_CALL(0, &o); }\n')
     check("the self-contained additions were found to compile", len(pieces) == 3, "got %d of 3 pieces; the extractors must keep up with the patch text" % len(pieces))
     if pieces:
         # This host's clang has no libc headers, so stdio/string are declared
@@ -259,7 +330,13 @@ else:
             + real_decls
             + 'struct wmtcmd_base { uint32_t type; struct WMTMemoryPointer next; };\n'
             'static uint32_t wmt_blit_cmd_size(int t){return 0;}\n'
-            + "\n".join(pieces) + "\nint main(void){return 0;}\n")
+            # The pieces come before the call site: the stand-in UNIX_CALL
+            # expands to wmt_pe_warn, so the probe needs that declared first. It
+            # compiled the other way round and failed on wmt_pe_warn, which
+            # would have sent the next person looking in the logging block
+            # instead of at the ordering.
+            + "\n".join(pieces) + "\n" + unix_call + unix_call_stubs
+            + "\nint main(void){return 0;}\n")
         with tempfile.TemporaryDirectory() as td:
             src = os.path.join(td, "frag.c")
             open(src, "w", encoding="utf-8").write(driver)
