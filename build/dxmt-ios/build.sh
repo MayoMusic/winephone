@@ -316,7 +316,22 @@ echo ""
 echo "Results: $SUCCEEDED succeeded, $FAILED failed"
 if [ -n "$FAILED_FILES" ]; then
     echo "Failed:$FAILED_FILES"
-    echo "See .err files in $OBJ_DIR/"
+    # The first error of each failing unit, here rather than only in the .err
+    # file. report_failure already prints 40 lines at the point of failure, but
+    # that is far above this summary and the summary is what a reader arrives
+    # at: it said "See .err files" and named no error, which is a pointer, not
+    # an answer. A failing build now ends with the message itself.
+    for name in $FAILED_FILES; do
+        err="$OBJ_DIR/$name.err"
+        if [ -s "$err" ]; then
+            first="$(grep -m1 -E '(fatal )?error:' "$err" 2>/dev/null)"
+            [ -n "$first" ] || first="$(head -n 1 "$err")"
+            echo "  $name: ${first:-<no output in $err>}"
+        else
+            echo "  $name: <no $err -- the compiler was not reached>"
+        fi
+    done
+    echo "Full stderr for each is in $OBJ_DIR/"
     exit 1
 fi
 

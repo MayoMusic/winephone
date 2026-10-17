@@ -67,22 +67,6 @@ for m in re.finditer(r"^(static\s+(?:NTSTATUS|int|void|const void|uint32_t)[^\n(
 check("no return type is stranded above a comment block",
       not any("return type is not stranded" in f for f in failures))
 
-# The driver has two header branches -- with libc headers and without -- and the
-# PE logging block needs va_start/va_end, which come from <stdarg.h>. Fixing that
-# in one branch and not the other passes here (this host has no libc headers, so
-# only the fallback is ever built) and fails on the macOS runner. So both are
-# asserted by name rather than by one of them happening to run.
-_src = open(os.path.abspath(__file__), encoding="utf-8").read()
-# Counted as the driver's own prefix literal, not as the string "#include
-# <stdarg.h>" -- the assertion below contains that text twice and would count
-# itself.
-_hdr = "#include <stdint.h>\\n#include <stddef.h>\\n#include <stdarg.h>\\n"
-check("<stdarg.h> is in both header branches of the driver",
-      _src.count(_hdr) == 2,
-      "found %d of 2; only the branch that runs locally has ever been compiled "
-      "here, so the other one is unchecked otherwise"
-      % _src.count(_hdr))
-
 # --- 2. includes are spelled the way the directory spells them --------------
 thunks = os.path.join(ROOT, "dxmt", "src", "winemetal", "winemetal_thunks.c")
 main_c = os.path.join(ROOT, "dxmt", "src", "winemetal", "main.c")
@@ -294,63 +278,133 @@ else:
                 '  struct WMTSize src_size; obj_handle_t dst; uint32_t dst_slice;\n'
                 '  uint32_t dst_level; struct WMTOrigin dst_origin; };\n')
 
-        driver = (
-            ('#include <stdint.h>\n#include <stddef.h>\n#include <stdarg.h>\n'
-             '#include <stdio.h>\n#include <string.h>\n'
-             + ('#include <mach/mach_time.h>\n' if have_mach else '')
-             if have_libc else
-             '#include <stdint.h>\n#include <stddef.h>\n#include <stdarg.h>\n'
-             'typedef struct { int dummy; } FILE;\n'
-             'FILE *fopen(const char *, const char *);\n'
-             'size_t fwrite(const void *, size_t, size_t, FILE *);\n'
-             'int fclose(FILE *);\n'
-             'int fprintf(FILE *, const char *, ...);\n'
-             'int snprintf(char *, size_t, const char *, ...);\n'
-             'void *memset(void *, int, size_t);\n'
-             # The PE logging block is C and needs va_list and the string
-             # functions. __builtin_va_list is the compiler's own, so it is
-             # available without a header; __SIZE_TYPE__ is size_t for whichever
-             # target is being compiled for, which is what vsnprintf wants.
-             'typedef __SIZE_TYPE__ wmt_size_t;\n'
-             'int vsnprintf(char *, wmt_size_t, const char *, va_list);\n'
-             'void *memcpy(void *, const void *, wmt_size_t);\n'
-             'wmt_size_t strlen(const char *);\n'
-             # NULL is not redefined: stddef.h is compiler-provided and resolves
-             # without libc, so it already has one. Defining it here collided
-             # with __stddef_null.h.
-             + ('' if have_mach else 'uint64_t mach_absolute_time(void);\n')
-             + '#define stderr ((FILE *)0)\n')
+        # Two translation units, because the sources this patch touches are two
+        # languages. winemetal_unix.c and winemetal_thunks.c are C;
+        # dxbc_converter.cpp is C++. Compiling all three pieces as C++ is what
+        # let `extern "C" void` through in the .c file -- valid C++, a syntax
+        # error in a .c -- and the build is where that was found.
+        # Both languages need the terminating semicolon here, not just C++: the
+        # header omits it because there the struct is a member of another one,
+        # and once extracted standalone it needs one. Stripping it for C made
+        # the C unit fail with "expected ';' after struct".
+        real_decls_c = real_decls
+
+        hdrs_common = ('#include <stdint.h>\n#include <stddef.h>\n'
+                       '#include <stdarg.h>\n')
+        stub_c = (
+            'typedef struct { int dummy; } FILE;\n'
+            'typedef __SIZE_TYPE__ wmt_size_t;\n'
+            'FILE *fopen(const char *, const char *);\n'
+            'size_t fwrite(const void *, size_t, size_t, FILE *);\n'
+            'int fclose(FILE *);\n'
+            'int fprintf(FILE *, const char *, ...);\n'
+            'int snprintf(char *, size_t, const char *, ...);\n'
+            'int vsnprintf(char *, size_t, const char *, va_list);\n'
+            'void *memset(void *, int, size_t);\n'
+            'void *memcpy(void *, const void *, size_t);\n'
+            'size_t strlen(const char *);\n'
+            'uint64_t mach_absolute_time(void);\n'
+            '#define stderr ((FILE *)0)\n')
+        # NULL is not redefined: stddef.h is compiler-provided and resolves
+        # without libc, so it already has one. Defining it collided with
+        # __stddef_null.h.
+
+        tu_c = (
+            (hdrs_common + '#include <stdio.h>\n#include <string.h>\n'
+             if have_libc else hdrs_common + stub_c)
             + 'typedef unsigned long obj_handle_t;\n'
-            # The enum first: the real struct declarations name it, and they are
-            # read out of winemetal.h so that a field this file invented -- it
-            # invented a dst_size, which does not exist -- fails here rather than
-            # twenty minutes into an IPA build.
             'enum WMTBlitCommandType { WMTBlitCommandCopyFromTextureToBuffer,\n'
             '  WMTBlitCommandCopyFromTextureToTexture, WMTBlitCommandMax };\n'
-            + real_decls
+            + real_decls_c
             + 'struct wmtcmd_base { uint32_t type; struct WMTMemoryPointer next; };\n'
             'static uint32_t wmt_blit_cmd_size(int t){return 0;}\n'
-            # The pieces come before the call site: the stand-in UNIX_CALL
-            # expands to wmt_pe_warn, so the probe needs that declared first. It
-            # compiled the other way round and failed on wmt_pe_warn, which
-            # would have sent the next person looking in the logging block
-            # instead of at the ordering.
-            + "\n".join(pieces) + "\n" + unix_call + unix_call_stubs
+            + pieces[1] + "\n" + pieces[2] + "\n" + unix_call + unix_call_stubs
             + "\nint main(void){return 0;}\n")
+
+        tu_cxx = (
+            (hdrs_common + '#include <stdio.h>\n#include <string.h>\n'
+             + ('#include <mach/mach_time.h>\n' if have_mach else '')
+             if have_libc else
+             hdrs_common + stub_c
+             + ('' if have_mach else 'uint64_t mach_absolute_time(void);\n'))
+            + "\n".join([pieces[0]]) + "\nint main(void){return 0;}\n")
+
+        # On macOS the SDK has to be named or mach/ is not found at all. xcrun
+        # does not exist elsewhere, so its absence is not a failure.
+        sdk_args = []
+        if shutil.which("xcrun"):
+            sdk = subprocess.run(["xcrun", "--sdk", "macosx", "--show-sdk-path"],
+                                 capture_output=True, text=True)
+            if sdk.returncode == 0 and sdk.stdout.strip():
+                sdk_args = ["-isysroot", sdk.stdout.strip()]
+
         with tempfile.TemporaryDirectory() as td:
-            src = os.path.join(td, "frag.c")
-            open(src, "w", encoding="utf-8").write(driver)
-            args = [cc, "-fsyntax-only", "-x", "c++", "-std=gnu++11"]
-            # On macOS the SDK has to be named or mach/ is not found at all.
-            # xcrun does not exist elsewhere, so its absence is not a failure.
-            if shutil.which("xcrun"):
-                sdk = subprocess.run(["xcrun", "--sdk", "macosx", "--show-sdk-path"],
-                                     capture_output=True, text=True)
-                if sdk.returncode == 0 and sdk.stdout.strip():
-                    args += ["-isysroot", sdk.stdout.strip()]
-            r = subprocess.run(args + [src], capture_output=True, text=True)
-            check("the added declarations are well-formed C++ (-fsyntax-only)",
-                  r.returncode == 0, (r.stderr or "").strip()[:300])
+            # Asserted on the generated source, which is what actually gets
+            # compiled, rather than on a count of strings in this file. Both
+            # units need va_start from <stdarg.h>; adding it to one branch and
+            # not the other passes here -- this host has no libc headers, so only
+            # the fallback is ever built -- and fails on the macOS runner.
+            check("both translation units include <stdarg.h>",
+                  "#include <stdarg.h>" in tu_c and "#include <stdarg.h>" in tu_cxx,
+                  "UNIX_CALL expands to va_start/va_end; without it the unit does "
+                  "not compile")
+
+            c_src = os.path.join(td, "frag.c")
+            open(c_src, "w", encoding="utf-8").write(tu_c)
+            # The language mode and warning set the real build uses for a C unit
+            # (build/dxmt-ios/build.sh: COMMON_FLAGS -std=c11 -Wall plus the
+            # MADEIRA_WARNINGS suppressions), minus the target. Matching -std is
+            # the part that matters: several of the errors that reached a build
+            # were language-mode errors, and C99-versus-C11 and gnu11-versus-c11
+            # differ on exactly the implicit-declaration rule that let
+            # GetCurrentThreadId through.
+            #
+            # What this is NOT: a build for arm64 against the iPhoneOS SDK. That
+            # needs the macOS runner and happens in the dxmt-ios stage; this
+            # stands in for it only for the declarations the patch adds.
+            cflags = [cc, "-fsyntax-only", "-x", "c", "-std=c11", "-Wall",
+                      "-Werror=implicit-function-declaration",
+                      "-Wno-unused-parameter", "-Wno-missing-field-initializers",
+                      "-Wno-missing-braces"]
+            r = subprocess.run(cflags + sdk_args + [c_src],
+                               capture_output=True, text=True)
+            check("the C additions are well-formed C (-std=c11 -fsyntax-only)",
+                  r.returncode == 0, (r.stderr or "").strip()[:400])
+
+            cxx_src = os.path.join(td, "frag.cpp")
+            open(cxx_src, "w", encoding="utf-8").write(tu_cxx)
+            r2 = subprocess.run([cc, "-fsyntax-only", "-x", "c++", "-std=gnu++11"]
+                                + sdk_args + [cxx_src],
+                                capture_output=True, text=True)
+            check("the C++ additions are well-formed C++ (-fsyntax-only)",
+                  r2.returncode == 0, (r2.stderr or "").strip()[:400])
+
+# --- 4. a .c file never carries a C++ linkage specifier ---------------------
+# The build's last error: winemetal_unix.c:2416 "expected identifier or '('",
+# at `extern "C" void`. That is legal in the .cpp in the same patch and a syntax
+# error in the .c. Asserted per file, from the patch, so it holds in CI where
+# dxmt is not checked out.
+for _chunk in re.split(r"(?m)^diff --git ", text):
+    if not _chunk.strip():
+        continue
+    _m = re.search(r"^\+\+\+ b/(\S+)", _chunk, re.M)
+    if not _m:
+        continue
+    _path = _m.group(1)
+    _added = "\n".join(l[1:] for l in _chunk.split("\n")
+                       if l.startswith("+") and not l.startswith("+++"))
+    # Comments are stripped: the fix for this error is a comment explaining that
+    # `extern "C" void` is the C++ form, and a check that matched its own
+    # explanation would fail forever against the record of the fix.
+    _code = re.sub(r"/\*.*?\*/", "", _added, flags=re.S)
+    _code = re.sub(r"//[^\n]*", "", _code)
+    if _path.endswith(".c"):
+        check("%s adds no C++ linkage specifier" % _path,
+              'extern "C"' not in _code,
+              "a .c is compiled as C; `extern \"C\"` is a syntax error there and "
+              "the build cannot see it until it compiles the file")
+    elif _path.endswith(".cpp"):
+        check("%s is the C++ side, as compiled" % _path, True)
 
 print("PASS" if not failures else "FAILED: " + "; ".join(failures))
 sys.exit(0 if not failures else 1)

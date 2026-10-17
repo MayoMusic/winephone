@@ -85,7 +85,7 @@ index db4ebbb..8d868cc 100644
    if (ret)
      return ret;
 diff --git a/src/winemetal/unix/winemetal_unix.c b/src/winemetal/unix/winemetal_unix.c
-index 3f7974e..7bf06a6 100644
+index 3f7974e..01b0bfd 100644
 --- a/src/winemetal/unix/winemetal_unix.c
 +++ b/src/winemetal/unix/winemetal_unix.c
 @@ -18,6 +18,57 @@ static inline CGDirectDisplayID CGMainDisplayID(void) { return 1; }
@@ -314,7 +314,7 @@ index 3f7974e..7bf06a6 100644
    MTLTextureDescriptor *desc = [[MTLTextureDescriptor alloc] init];
    fill_texture_descriptor(desc, info);
  
-@@ -2143,10 +2327,146 @@ static uint32_t wmt_blit_cmd_size(unsigned type) {
+@@ -2143,10 +2327,152 @@ static uint32_t wmt_blit_cmd_size(unsigned type) {
      }
  }
  
@@ -404,7 +404,13 @@ index 3f7974e..7bf06a6 100644
 +  }
 +}
 +
-+extern "C" void
++/* Plain C, no extern "C" -- this file is a .c and is compiled as C. The build
++ * said "expected identifier or '('" at the linkage specifier, which is the C++
++ * form. The consumer on the other side, build/ntdll-unix/signal_arm64_ios.c, is
++ * also C and declares this weakly as `extern void wmt_blit_ring_dump(void)`, so
++ * plain C linkage already produces the name it looks for. The C++ spelling is
++ * only needed for dxbc_converter.cpp, which is where the other dumper lives. */
++void
 +wmt_blit_ring_dump(void) {
 +  /* The tick, so these lines can be lined up against [footprint] and the
 +   * exception report, which are on a different clock and a different stream. */
@@ -461,7 +467,7 @@ index 3f7974e..7bf06a6 100644
    if (wmtr_enabled()) {
      /* Blit commands carry only handles and scalars, so each struct travels
       * verbatim as {type, size, bytes}; the guest-pointer `next` is not sent.
-@@ -3952,6 +4272,12 @@ _MetalLayer_setProps(void *obj) {
+@@ -3952,6 +4278,12 @@ _MetalLayer_setProps(void *obj) {
  static NTSTATUS
  _MetalLayer_getProps(void *obj) {
    struct unixcall_generic_obj_ptr_noret *params = obj;
@@ -474,7 +480,7 @@ index 3f7974e..7bf06a6 100644
    if (wmtr_enabled()) {
      struct WMTLayerProps got;
      if (wmtr_call(RM_OP_LAYER_GET_PROPS, 0, 0, &got, sizeof got, 0) == RM_OK) {
-@@ -4945,6 +5271,14 @@ _MTLLogContainer_enumerate(void *obj) {
+@@ -4945,6 +5277,14 @@ _MTLLogContainer_enumerate(void *obj) {
    uint64_t count = 0;
    uint64_t read = 0;
    id *buffer = params->buffer.ptr;
@@ -489,7 +495,7 @@ index 3f7974e..7bf06a6 100644
    for (id _ in (id<MTLLogContainer>)params->enumeratable) {
      if (count >= params->start) {
        if (count < params->start + params->buffer_size) {
-@@ -5111,6 +5445,10 @@ static NTSTATUS
+@@ -5111,6 +5451,10 @@ static NTSTATUS
  _WMTGetDisplayDescription(void *obj) {
    struct unixcall_generic_obj_ptr_noret *params = obj;
    struct WMTDisplayDescription *desc_out = params->arg.ptr;
@@ -500,7 +506,7 @@ index 3f7974e..7bf06a6 100644
  #if TARGET_OS_IOS
    (void)params;
    desc_out->maximum_edr_color_component_value = 1.0;
-@@ -5150,6 +5488,11 @@ _MetalLayer_getEDRValue(void *obj) {
+@@ -5150,6 +5494,11 @@ _MetalLayer_getEDRValue(void *obj) {
    struct unixcall_generic_obj_ptr_noret *params = obj;
    CAMetalLayer *layer = (CAMetalLayer *)params->handle;
    struct WMTEDRValue *value = params->arg.ptr;
