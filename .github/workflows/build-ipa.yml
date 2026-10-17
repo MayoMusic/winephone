@@ -363,6 +363,8 @@ jobs:
         run: python3 tests/host/check-lean-diag.py
       - name: Check library-sections
         run: python3 tests/host/check-library-sections.py
+      - name: Check wmt-null-dest
+        run: python3 tests/host/check-wmt-null-dest.py
       - name: Check map-fail
         run: python3 tests/host/check-map-fail.py
       - name: Check metal-gap

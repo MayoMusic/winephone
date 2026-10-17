@@ -1,0 +1,218 @@
+diff --git a/src/winemetal/unix/winemetal_unix.c b/src/winemetal/unix/winemetal_unix.c
+index 3f7974e..1313be4 100644
+--- a/src/winemetal/unix/winemetal_unix.c
++++ b/src/winemetal/unix/winemetal_unix.c
+@@ -483,9 +483,59 @@ _MTLDevice_name(void *obj) {
+   return STATUS_SUCCESS;
+ }
+ 
++/* ---------------------------------------------------------------------------
++ * Null destination pointers  (Madeira)
++ *
++ * FIVE entries in this table store through a pointer the caller supplied, and
++ * a NULL stays NULL all the way to the store:
++ *
++ *   code  8  _NSString_getCString            Foundation getCString: writes
++ *   code 71  _MetalLayer_getProps            writes; a literal
++ *                                               NULL-destination memcpy under wmtr
++ *   code 91  _MTLLogContainer_enumerate      writes an array of handles
++ *   code 96  _WMTGetDisplayDescription      writes a fixed struct
++ *   code 97  _MetalLayer_getEDRValue        writes a fixed struct
++ *
++ * Nothing between the caller and the store checked it. The PE-side thunks carry
++ * the pointer as a WMTMemoryPointer, wow_in()/wow_in_wide() preserve NULL by
++ * design ("Guest -> host ... preserves NULL"), and the 64-bit and 32-bit
++ * dispatch tables are SEPARATE entries -- so the thunk's check and the table's
++ * check are not the same check.
++ *
++ * Two NULLs are legitimate and are kept working:
++ *
++ *   - a length query: NULL with a zero maxLength/buffer_size. getCString
++ *     returns the byte count and enumerate's bounds test writes nothing, so a
++ *     caller is allowed to pass no buffer at all. Foundation is where that
++ *     answer comes from, so these must still be dispatched.
++ *   - a fixed-size struct out-parameter has no such form: it is always written,
++ *     so there sizeof(*destination) stands in for the count.
++ *
++ * Every OTHER entry that carries a WMTMemoryPointer takes it as an INPUT, where
++ * NULL means "empty" and Foundation handles it. Those are deliberately not
++ * listed here -- they are not destinations.
++ *
++ * The matching thunks in winemetal_thunks.c already refuse to cross, so these
++ * checks only fire for the paths that do not come from a thunk and for a NULL
++ * the wmtr RPC layer delivers. Both are worth a compare.
++ * ------------------------------------------------------------------------- */
++
++/* Would this call store through a NULL pointer? A count of 0 means the caller
++   is asking a question rather than supplying a destination. */
++static inline int
++wmt_null_dest(const void *field, uint64_t count) {
++  return !field && count != 0;
++}
++
+ static NTSTATUS
+ _NSString_getCString(void *obj) {
+   struct unixcall_nsstring_getcstring *params = obj;
++
++  if (wmt_null_dest((const void *)(uintptr_t)params->buffer_ptr, params->max_length)) {
++    params->ret = 0;
++    return STATUS_INVALID_PARAMETER;
++  }
++
+   params->ret = (uint32_t)[(NSString *)params->str getCString:(char *)params->buffer_ptr
+                                                     maxLength:params->max_length
+                                                      encoding:params->encoding];
+@@ -3952,6 +4002,12 @@ _MetalLayer_setProps(void *obj) {
+ static NTSTATUS
+ _MetalLayer_getProps(void *obj) {
+   struct unixcall_generic_obj_ptr_noret *params = obj;
++
++  /* Read AND written (the granted size goes back into the same block), so
++   * sizeof(*destination) is the count: there is no length-query form. */
++  if (wmt_null_dest(params->arg.ptr, sizeof(struct WMTLayerProps)))
++    return STATUS_INVALID_PARAMETER;
++
+   if (wmtr_enabled()) {
+     struct WMTLayerProps got;
+     if (wmtr_call(RM_OP_LAYER_GET_PROPS, 0, 0, &got, sizeof got, 0) == RM_OK) {
+@@ -4945,6 +5001,14 @@ _MTLLogContainer_enumerate(void *obj) {
+   uint64_t count = 0;
+   uint64_t read = 0;
+   id *buffer = params->buffer.ptr;
++
++  /* A NULL array with a zero buffer_size is the count query -- the bounds test
++   * below writes nothing -- so it still crosses. */
++  if (wmt_null_dest(buffer, params->buffer_size)) {
++    params->ret_read = 0;
++    return STATUS_INVALID_PARAMETER;
++  }
++
+   for (id _ in (id<MTLLogContainer>)params->enumeratable) {
+     if (count >= params->start) {
+       if (count < params->start + params->buffer_size) {
+@@ -5111,6 +5175,10 @@ static NTSTATUS
+ _WMTGetDisplayDescription(void *obj) {
+   struct unixcall_generic_obj_ptr_noret *params = obj;
+   struct WMTDisplayDescription *desc_out = params->arg.ptr;
++
++  /* Fixed-size struct, always written on both the iOS and the desktop arm. */
++  if (wmt_null_dest(desc_out, sizeof *desc_out))
++    return STATUS_INVALID_PARAMETER;
+ #if TARGET_OS_IOS
+   (void)params;
+   desc_out->maximum_edr_color_component_value = 1.0;
+@@ -5150,6 +5218,11 @@ _MetalLayer_getEDRValue(void *obj) {
+   struct unixcall_generic_obj_ptr_noret *params = obj;
+   CAMetalLayer *layer = (CAMetalLayer *)params->handle;
+   struct WMTEDRValue *value = params->arg.ptr;
++
++  /* Written before any of the early returns below, so it is not optional. */
++  if (wmt_null_dest(value, sizeof *value))
++    return STATUS_INVALID_PARAMETER;
++
+   value->maximum_edr_color_component_value = 1.0;
+   value->maximum_potential_edr_color_component_value = 1.0;
+ 
+diff --git a/src/winemetal/winemetal_thunks.c b/src/winemetal/winemetal_thunks.c
+index c473702..c7bdf58 100644
+--- a/src/winemetal/winemetal_thunks.c
++++ b/src/winemetal/winemetal_thunks.c
+@@ -112,10 +112,27 @@ MTLDevice_name(obj_handle_t device) {
+ WINEMETAL_API uint32_t
+ NSString_getCString(obj_handle_t str, char *buffer, uint64_t maxLength, enum WMTStringEncoding encoding) {
+   struct unixcall_nsstring_getcstring params;
++
++  /* One of the five entries whose DESTINATION is caller-supplied: see the
++   * "Null destination pointers" block in unix/winemetal_unix.c for the whole
++   * set and why NULL survives to the store. buffer_ptr crosses the boundary as
++   * a bare uint64_t and the unix side hands it straight to
++   * -[NSString getCString:maxLength:encoding:] as an OUT pointer.
++   *
++   * NULL with maxLength == 0 is the length query -- the caller wants the byte
++   * count and supplies no buffer -- and the answer comes from Foundation, so
++   * that case must still cross. Only NULL with a nonzero maxLength asks
++   * Foundation to write into nothing, and that never leaves this side. */
++  if (!buffer && maxLength) {
++    wmt_api_census_note(8);   /* the guest did call this; it just does not cross */
++    return 0;
++  }
++
+   params.str = str;
+   params.buffer_ptr = PtrToUInt64(buffer);
+   params.max_length = maxLength;
+   params.encoding = encoding;
++  params.ret = 0;
+   UNIX_CALL(8, &params);
+   return params.ret;
+ }
+@@ -730,6 +747,16 @@ MetalLayer_setProps(obj_handle_t layer, const struct WMTLayerProps *props) {
+ WINEMETAL_API void
+ MetalLayer_getProps(obj_handle_t layer, struct WMTLayerProps *props) {
+   struct unixcall_generic_obj_ptr_noret params;
++
++  /* INOUT: the handler writes the granted drawable size through this pointer
++   * and, under wmtr, does a NULL-destination memcpy with it. A fixed-size
++   * struct out-parameter has no length-query form, so a NULL is always wrong.
++   * See the "Null destination pointers" block in unix/winemetal_unix.c. */
++  if (!props) {
++    wmt_api_census_note(71);
++    return;
++  }
++
+   params.handle = layer;
+   WMT_MEMPTR_SET(params.arg, props);
+   UNIX_CALL(71, &params);
+@@ -791,6 +818,16 @@ MTLCommandBuffer_logs(obj_handle_t cmdbuf) {
+ WINEMETAL_API uint64_t
+ MTLLogContainer_enumerate(obj_handle_t logs, uint64_t start, uint64_t buffer_size, obj_handle_t *buffer) {
+   struct unixcall_enumerate params;
++
++  /* OUT array of handles. buffer == NULL with buffer_size == 0 is the count
++   * query -- the handler's bounds test writes nothing -- so it still crosses.
++   * A nonzero count with no array is the write that would fault.
++   * See the "Null destination pointers" block in unix/winemetal_unix.c. */
++  if (!buffer && buffer_size) {
++    wmt_api_census_note(91);
++    return 0;
++  }
++
+   params.enumeratable = logs;
+   params.start = start;
+   params.buffer_size = buffer_size;
+@@ -838,6 +875,14 @@ WMTGetSecondaryDisplayId() {
+ WINEMETAL_API void
+ WMTGetDisplayDescription(uint32_t display_id, struct WMTDisplayDescription *desc) {
+   struct unixcall_generic_obj_ptr_noret params;
++
++  /* Fixed-size struct out-parameter, always written. See the "Null destination
++   * pointers" block in unix/winemetal_unix.c. */
++  if (!desc) {
++    wmt_api_census_note(96);
++    return;
++  }
++
+   params.handle = display_id;
+   WMT_MEMPTR_SET(params.arg, desc);
+   UNIX_CALL(96, &params);
+@@ -845,7 +890,20 @@ WMTGetDisplayDescription(uint32_t display_id, struct WMTDisplayDescription *desc
+ 
+ WINEMETAL_API void
+ MetalLayer_getEDRValue(obj_handle_t layer, struct WMTEDRValue *value) {
+-  struct unixcall_generic_obj_constptr_noret params;
++  /* This writes through the pointer -- the handler stores two doubles into it
++   * before any early return -- so it carries a WMTMemoryPointer. The const
++   * variant is the same 8 bytes on the wire (STATIC_ASSERT on both) and says
++   * the opposite of what this entry does, which is how a NULL here went
++   * unnoticed. */
++  struct unixcall_generic_obj_ptr_noret params;
++
++  /* Fixed-size struct out-parameter, always written. See the "Null destination
++   * pointers" block in unix/winemetal_unix.c. */
++  if (!value) {
++    wmt_api_census_note(97);
++    return;
++  }
++
+   params.handle = layer;
+   WMT_MEMPTR_SET(params.arg, value);
+   UNIX_CALL(97, &params);
