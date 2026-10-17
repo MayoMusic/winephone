@@ -988,9 +988,30 @@ ios_dxbc_dump_dir(void)
     static char dir[512];
     if (!dir[0])
     {
+        /* MADEIRA_DOCS_DIR is exported by the app and points at the app
+         * container's Documents directory; Wine's own $HOME is the wineprefix
+         * (Documents/wine), so appending /Documents there -- the previous code
+         * -- produced .../Documents/wine/Documents, which does not exist and is
+         * why every run printed "could not open .../Documents/wine/Documents/
+         * wmt-last-dxbc.bin". Prefer MADEIRA_DOCS_DIR, then a $HOME that already
+         * ends in /Documents (nothing to append), then $HOME itself. */
+        const char *docs = getenv("MADEIRA_DOCS_DIR");
         const char *home = getenv("HOME");
-        if (!home || !*home) { fprintf(stderr, "[dxbc-dump] HOME is unset, no path\n"); return ""; }
-        snprintf(dir, sizeof(dir), "%s/Documents", home);
+        char base[512];
+        base[0] = '\0';
+        if (docs && *docs)
+            snprintf(base, sizeof(base), "%s", docs);
+        else if (home && *home) {
+            size_t n = strlen(home);
+            if (n >= 5 && strcmp(home + n - 5, "/wine") == 0)
+                snprintf(base, sizeof(base), "%.*s/Documents", (int)(n - 5), home);
+            else if (n >= 9 && strcmp(home + n - 9, "/Documents") == 0)
+                snprintf(base, sizeof(base), "%s", home);
+            else
+                snprintf(base, sizeof(base), "%s/Documents", home);
+        }
+        if (!base[0]) { fprintf(stderr, "[dxbc-dump] no docs dir and no HOME\n"); return ""; }
+        snprintf(dir, sizeof(dir), "%s", base);
     }
     return dir;
 }
