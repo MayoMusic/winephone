@@ -27,6 +27,8 @@ ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 PATCH = os.path.join(ROOT, "patches", "dxmt-wmt-null-dest.patch")
 PE = os.path.join(ROOT, "dxmt", "src", "winemetal", "winemetal_thunks.c")
 HOST = os.path.join(ROOT, "dxmt", "src", "winemetal", "unix", "winemetal_unix.c")
+if not os.path.exists(HOST):
+    HOST = PATCH
 
 failures = []
 
@@ -37,16 +39,28 @@ def check(what, cond, detail=""):
         failures.append(what)
 
 
-# The PE file may not exist when dxmt is not checked out; the patch always does.
-if not os.path.exists(PE):
+# The PE file may not exist when dxmt is not checked out -- and it does not exist
+# in the host-checks job, which is where this runs. The patch always does, and it
+# carries the same text, so fall back to it.
+#
+# A patch's added lines are prefixed with '+', which is not part of the source.
+# Reading them raw makes every line-start assertion fail on a change that is
+# present, which is what CI reported: the WARN lines were there, behind a '+'.
+FROM_PATCH = not os.path.exists(PE)
+if FROM_PATCH:
     PE = PATCH
-check("a PE-side source to inspect", os.path.exists(PE), PE)
+check("a PE-side source to inspect", os.path.exists(PE),
+      "%s (dxmt not checked out, reading the patch instead)" % os.path.basename(PE) if FROM_PATCH else PE)
 if not os.path.exists(PE):
     print("FAILED: cannot inspect the PE side")
     sys.exit(1)
 
 pe = open(PE, encoding="utf-8", errors="replace").read()
+if FROM_PATCH:
+    pe = "\n".join(l[1:] if l.startswith("+") else l for l in pe.split("\n"))
 host = open(HOST, encoding="utf-8", errors="replace").read() if os.path.exists(HOST) else ""
+if HOST == PATCH:
+    host = "\n".join(l[1:] if l.startswith("+") else l for l in host.split("\n"))
 
 # --- PE-side diagnostics must use WARN, not stderr --------------------------
 # Strip comments before looking: these tags are named in prose explaining what
