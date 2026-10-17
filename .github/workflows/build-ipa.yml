@@ -369,6 +369,10 @@ jobs:
         run: python3 tests/host/check-library-sections.py
       - name: Check submodule-patches
         run: bash tests/host/check-submodule-patches.sh
+      - name: Check patch-bytes
+        run: python3 tests/host/check-patch-bytes.py
+      - name: Check patches-apply
+        run: bash tests/host/check-patches-apply.sh
       - name: Check map-fail
         run: python3 tests/host/check-map-fail.py
       - name: Check metal-gap
