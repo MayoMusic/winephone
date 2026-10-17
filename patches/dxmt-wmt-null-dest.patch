@@ -519,10 +519,10 @@ index 3f7974e..01b0bfd 100644
    value->maximum_potential_edr_color_component_value = 1.0;
  
 diff --git a/src/winemetal/winemetal_thunks.c b/src/winemetal/winemetal_thunks.c
-index c473702..3cb8f02 100644
+index c473702..944d168 100644
 --- a/src/winemetal/winemetal_thunks.c
 +++ b/src/winemetal/winemetal_thunks.c
-@@ -6,8 +6,114 @@
+@@ -6,8 +6,131 @@
  
  #include "winemetal_thunks.h"
  #include <wineunixlib.h>
@@ -533,6 +533,14 @@ index c473702..3cb8f02 100644
 +#include <stdio.h>
 +#include <stdarg.h>
 +#include <pthread.h>
++
++#if defined(_WIN32)
++/* Declared, not included: windef.h is Wine's name and is not in the PE side's
++ * toolchain headers. The same declaration is what windef.h used to provide, and
++ * the only reason it was missing is that the include that carried it is gone.
++ * It is a kernel32 import, so it links on the PE target and nowhere else. */
++extern unsigned long GetCurrentThreadId(void);
++#endif
 +
 +/* The thread id in [wmt-fail], as a number this target can produce.
 + *
@@ -549,6 +557,15 @@ index c473702..3cb8f02 100644
 +    uint64_t tid = 0;
 +    pthread_threadid_np(NULL, &tid);
 +    return (unsigned long)tid;
++#elif defined(_WIN32)
++    /* This file is also compiled into a PE image in the wine-pe-modules stage
++     * (see build-ipa.sh's wine-pe-modules step), where it IS a Windows DLL and
++     * GetCurrentThreadId is a kernel32 import. The link error in the last run
++     * came from the iOS build, which defines neither __APPLE__-style nor the
++     * Win32 macros and so fell through to pthread_self, which has no import
++     * library on the PE link line either. Guarding by _WIN32 puts each target
++     * on a symbol it can resolve. */
++    return (unsigned long)GetCurrentThreadId();
 +#else
 +    return (unsigned long)pthread_self();
 +#endif
@@ -639,7 +656,7 @@ index c473702..3cb8f02 100644
  
  /* ml761: top-level API census.
   *
-@@ -39,12 +145,46 @@ extern void wmt_api_census_note(unsigned code);
+@@ -39,12 +162,46 @@ extern void wmt_api_census_note(unsigned code);
    {                                                                                                                    \
      wmt_api_census_note(code);                                                                                         \
      NTSTATUS status = WINE_UNIX_CALL(code, params);                                                                    \
@@ -687,7 +704,7 @@ index c473702..3cb8f02 100644
  WINEMETAL_API void
  NSObject_retain(obj_handle_t obj) {
    UNIX_CALL(0, &obj);
-@@ -112,10 +252,27 @@ MTLDevice_name(obj_handle_t device) {
+@@ -112,10 +269,27 @@ MTLDevice_name(obj_handle_t device) {
  WINEMETAL_API uint32_t
  NSString_getCString(obj_handle_t str, char *buffer, uint64_t maxLength, enum WMTStringEncoding encoding) {
    struct unixcall_nsstring_getcstring params;
@@ -715,7 +732,7 @@ index c473702..3cb8f02 100644
    UNIX_CALL(8, &params);
    return params.ret;
  }
-@@ -230,6 +387,24 @@ MTLDevice_newDepthStencilState(obj_handle_t device, const struct WMTDepthStencil
+@@ -230,6 +404,24 @@ MTLDevice_newDepthStencilState(obj_handle_t device, const struct WMTDepthStencil
  WINEMETAL_API obj_handle_t
  MTLDevice_newTexture(obj_handle_t device, struct WMTTextureInfo *info) {
    struct unixcall_mtldevice_newtexture params;
@@ -740,7 +757,7 @@ index c473702..3cb8f02 100644
    params.device = device;
    WMT_MEMPTR_SET(params.info, info);
    UNIX_CALL(21, &params);
-@@ -730,6 +905,16 @@ MetalLayer_setProps(obj_handle_t layer, const struct WMTLayerProps *props) {
+@@ -730,6 +922,16 @@ MetalLayer_setProps(obj_handle_t layer, const struct WMTLayerProps *props) {
  WINEMETAL_API void
  MetalLayer_getProps(obj_handle_t layer, struct WMTLayerProps *props) {
    struct unixcall_generic_obj_ptr_noret params;
@@ -757,7 +774,7 @@ index c473702..3cb8f02 100644
    params.handle = layer;
    WMT_MEMPTR_SET(params.arg, props);
    UNIX_CALL(71, &params);
-@@ -791,6 +976,16 @@ MTLCommandBuffer_logs(obj_handle_t cmdbuf) {
+@@ -791,6 +993,16 @@ MTLCommandBuffer_logs(obj_handle_t cmdbuf) {
  WINEMETAL_API uint64_t
  MTLLogContainer_enumerate(obj_handle_t logs, uint64_t start, uint64_t buffer_size, obj_handle_t *buffer) {
    struct unixcall_enumerate params;
@@ -774,7 +791,7 @@ index c473702..3cb8f02 100644
    params.enumeratable = logs;
    params.start = start;
    params.buffer_size = buffer_size;
-@@ -838,6 +1033,14 @@ WMTGetSecondaryDisplayId() {
+@@ -838,6 +1050,14 @@ WMTGetSecondaryDisplayId() {
  WINEMETAL_API void
  WMTGetDisplayDescription(uint32_t display_id, struct WMTDisplayDescription *desc) {
    struct unixcall_generic_obj_ptr_noret params;
@@ -789,7 +806,7 @@ index c473702..3cb8f02 100644
    params.handle = display_id;
    WMT_MEMPTR_SET(params.arg, desc);
    UNIX_CALL(96, &params);
-@@ -845,7 +1048,20 @@ WMTGetDisplayDescription(uint32_t display_id, struct WMTDisplayDescription *desc
+@@ -845,7 +1065,20 @@ WMTGetDisplayDescription(uint32_t display_id, struct WMTDisplayDescription *desc
  
  WINEMETAL_API void
  MetalLayer_getEDRValue(obj_handle_t layer, struct WMTEDRValue *value) {

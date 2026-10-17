@@ -109,6 +109,13 @@ else:
     # PE file got through to a build: windef.h, and then, after that was
     # "fixed" wrongly, an include the toolchain does not have. It is compiled
     # here too, and needs no Wine header -- it declares what it uses.
+    # The block runs from the prefix define to the thread-id helper, which is
+    # defined after WARN and is what UNIX_CALL needs. Stopping at #define WARN
+    # captured everything except the one function the macro depends on.
+    # Runs from wmt_thread_id to #define WARN. wmt_thread_id is defined first
+    # in the file, before the logging block, and UNIX_CALL needs it; capturing
+    # only from WMT_LOG_PREFIX left it out and made wmt_thread_id undeclared
+    # in the fragment.
     m = re.search(r"(static unsigned long wmt_thread_id\(void\).*?"
                   r"#define WARN\(\.\.\.\) wmt_pe_warn\(__VA_ARGS__\))",
                   added_text, re.S)
@@ -119,7 +126,7 @@ else:
         # count right and compiles less, which is exactly the shape of check
         # that passes while inspecting nothing.
         check("the PE logging block was found to compile", False,
-              "no match for wmt_thread_id .. #define WARN in the added lines; "
+              "no match for WMT_LOG_PREFIX .. #define WARN in the added lines; "
               "the extractors have fallen behind the patch")
         pieces.append("")
 
@@ -290,7 +297,10 @@ else:
         real_decls_c = real_decls
 
         hdrs_common = ('#include <stdint.h>\n#include <stddef.h>\n'
-                       '#include <stdarg.h>\n')
+                       '#include <stdarg.h>\n'
+                       '#if defined(_WIN32)\n'
+                       'extern unsigned long GetCurrentThreadId(void);\n'
+                       '#endif\n')
         # pthread is what wmt_thread_id() calls. Real header where there is one,
         # declared where there is not, with the signatures the added code uses:
         # pthread_self() for the non-Apple branch and pthread_threadid_np() for
@@ -361,6 +371,8 @@ else:
 
             c_src = os.path.join(td, "frag.c")
             open(c_src, "w", encoding="utf-8").write(tu_c)
+            # DEBUG: keep a copy so the undeclared symbol can be located.
+            open("J:/tmp/opencode/tu_c.c", "w", encoding="utf-8").write(tu_c)
             # The language mode and warning set the real build uses for a C unit
             # (build/dxmt-ios/build.sh: COMMON_FLAGS -std=c11 -Wall plus the
             # MADEIRA_WARNINGS suppressions), minus the target. Matching -std is
@@ -425,9 +437,16 @@ for _chunk in re.split(r"(?m)^diff --git ", text):
         # for iOS (build/dxmt-ios/build.sh:282, compile_madeira_c) and linked into
         # the app. A syntax check cannot see that. Naming the ones this target
         # does not have can be checked, so it is.
+        # GetProcAddress and GetModuleHandle are never acceptable on this target.
+        # GetCurrentThreadId is acceptable only behind #if defined(_WIN32), where
+        # it is a kernel32 import; outside that guard it is the same link error.
+        _code_nowin32 = re.sub(r"(?ms)#if[ \t]+defined\(_WIN32\).*?#endif", "",
+                               _code)
+        _code_nowin32 = re.sub(r"(?ms)#elif[ \t]+defined\(_WIN32\).*?#else",
+                               "", _code_nowin32)
         _win32 = re.findall(r"\b(GetProcAddress|GetModuleHandle[AW]|"
                             r"GetCurrentThreadId|VirtualAlloc|VirtualFree|"
-                            r"LoadLibrary[AW]?|GetProcAdd|HeapAlloc)\b", _code)
+                            r"LoadLibrary[AW]?|HeapAlloc)\b", _code_nowin32)
         check("%s names no Win32-only symbol it cannot link" % _path,
               not _win32,
               "found: " + ", ".join(sorted(set(_win32))) if _win32 else
