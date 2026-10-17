@@ -73,6 +73,17 @@ rm -f patches/zzz-unclaimed.patch
 
 expect "clean and idempotent afterwards"                 0 "already present"
 
+# H: a patch that targets the parent repo. CI's first run of this stopped here --
+# patches/0001-winephone-build-exclusions.patch tracked files in this repository
+# and no rule claimed it. The file is a committed git series already present in
+# the tree, so the branch it must take is "already present", which is only
+# reachable once the target is right.
+printf 'a\n' > seed.txt; git add -A; git commit -qm seed
+printf 'a\nb\n' > seed.txt
+git diff --output="$T/repo/patches/0001-self.patch"
+git add -A; git commit -qm "series applied"
+expect "a parent-repo patch is recognised, not rejected" 0 "already present"
+
 # The real verification list, with its patch absent: the guard that stops a
 # check from quietly ceasing to run.
 cp "$SCRIPT" scripts/apply-submodule-patches.sh

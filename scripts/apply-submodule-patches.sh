@@ -31,11 +31,17 @@ PATCH_DIR="$ROOT/patches"
 # patch glob -> the tree it applies to. "self" is the WinePhone repo; anything
 # else is the path of a submodule, applied from that submodule's own root.
 # Order matters: the first match wins.
+#
+# 0001-* is a git-format-patch series and targets files this repository tracks,
+# so it applies to the parent tree -- it was already committed here and lands in
+# the "already present" branch, which is the point: the rule has to exist for the
+# script not to reject it.
 PATCH_TARGETS=(
   'dxmt-*.patch:dxmt'
   'fex-*.patch:FEX'
   'wine-*.patch:wine'
   'madeira-dock-*.patch:madeira-dock'
+  '0001-*.patch:self'
   '*-self.patch:self'
 )
 
