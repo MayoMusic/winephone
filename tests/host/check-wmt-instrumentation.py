@@ -78,7 +78,9 @@ for tag in ("[tex-bad-pe]", "[wmt-fail]"):
     check("%s goes through WARN" % tag, line.lstrip().startswith("WARN("),
           line.strip()[:60])
 check("winemetal_thunks.c includes windef.h for WARN",
-      re.search(r'#include\s*<windef\.h>', pe) is not None)
+      re.search(r'#include\s*"windef\.h"', pe) is not None,
+      "quotes, like src/winemetal/main.c in the same directory: angle brackets "
+      "search the compiler's system path and do not find Wine's headers")
 check("the PE side has no diagnostic left on fprintf(stderr)",
       re.search(r'fprintf\(stderr,\s*"\[(tex-bad-pe|wmt-fail)\]', pe_code) is None)
 
