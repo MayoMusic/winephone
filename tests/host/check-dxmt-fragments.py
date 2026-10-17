@@ -170,6 +170,24 @@ else:
             # weaker check and says so.
             print("note: dxmt is not checked out, so the struct shapes cannot be "
                   "compared against the real header")
+            # A stand-in with the same shape, so the compile still says something
+            # about the declarations rather than dying on a missing type. This is
+            # the weaker check and the note above says so.
+            real_decls = (
+                'struct WMTMemoryPointer { void *ptr; };\n'
+                'struct WMTOrigin { uint64_t x, y, z; };\n'
+                'struct WMTSize { uint64_t width, height, depth; };\n'
+                'struct wmtcmd_blit_copy_from_texture_to_buffer {\n'
+                '  enum WMTBlitCommandType type; uint16_t reserved[3];\n'
+                '  struct WMTMemoryPointer next; obj_handle_t src; uint32_t slice;\n'
+                '  uint32_t level; struct WMTOrigin origin; struct WMTSize size;\n'
+                '  obj_handle_t dst; };\n'
+                'struct wmtcmd_blit_copy_from_texture_to_texture {\n'
+                '  enum WMTBlitCommandType type; uint16_t reserved[3];\n'
+                '  struct WMTMemoryPointer next; obj_handle_t src; uint32_t src_slice;\n'
+                '  uint32_t src_level; struct WMTOrigin src_origin;\n'
+                '  struct WMTSize src_size; obj_handle_t dst; uint32_t dst_slice;\n'
+                '  uint32_t dst_level; struct WMTOrigin dst_origin; };\n')
 
         driver = (
             ('#include <stdint.h>\n#include <stddef.h>\n'
