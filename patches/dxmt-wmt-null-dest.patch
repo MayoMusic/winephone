@@ -85,7 +85,7 @@ index db4ebbb..8d868cc 100644
    if (ret)
      return ret;
 diff --git a/src/winemetal/unix/winemetal_unix.c b/src/winemetal/unix/winemetal_unix.c
-index 3f7974e..2140914 100644
+index 3f7974e..fa9349e 100644
 --- a/src/winemetal/unix/winemetal_unix.c
 +++ b/src/winemetal/unix/winemetal_unix.c
 @@ -18,6 +18,57 @@ static inline CGDirectDisplayID CGMainDisplayID(void) { return 1; }
@@ -314,10 +314,10 @@ index 3f7974e..2140914 100644
    MTLTextureDescriptor *desc = [[MTLTextureDescriptor alloc] init];
    fill_texture_descriptor(desc, info);
  
-@@ -2144,9 +2328,138 @@ static uint32_t wmt_blit_cmd_size(unsigned type) {
+@@ -2143,10 +2327,143 @@ static uint32_t wmt_blit_cmd_size(unsigned type) {
+     }
  }
  
- static NTSTATUS
 +/* ---- last blit commands, for a fault inside the driver -------------------
 + *
 + * Run 2 of the 15:32-15:40 logs reached objc_retain inside AGX with a pointer
@@ -360,7 +360,10 @@ index 3f7974e..2140914 100644
 +static void
 +wmt_blit_ring_record(obj_handle_t encoder, const struct wmtcmd_base *head) {
 +  unsigned n = 0;
-+  for (const struct wmtcmd_base *c = head; c && n < WMT_BLIT_RING; c = c->next.ptr, n++) {
++  for (const struct wmtcmd_base *c = head; c && n < WMT_BLIT_RING; n++) {
++    /* next.ptr is void*, so the chain hop needs the cast the existing code does
++       elsewhere; this loop cannot put it in the for-expression and still compile. */
++    const struct wmtcmd_base *next_cmd = (const struct wmtcmd_base *)c->next.ptr;
 +    struct wmt_blit_rec *r = &g_blit_ring[g_blit_ring_at];
 +    unsigned at = g_blit_ring_at;
 +    g_blit_ring_at = (at + 1) % WMT_BLIT_RING;
@@ -394,6 +397,7 @@ index 3f7974e..2140914 100644
 +         and valid stays 0 so the reader knows not to trust the handles. */
 +      break;
 +    }
++    c = next_cmd;
 +  }
 +}
 +
@@ -428,6 +432,7 @@ index 3f7974e..2140914 100644
 +  }
 +}
 +
+ static NTSTATUS
  _MTLBlitCommandEncoder_encodeCommands(void *obj) {
    struct unixcall_generic_obj_cmd_noret *params = obj;
    const struct wmtcmd_base *next = params->cmd_head.ptr;
@@ -453,7 +458,7 @@ index 3f7974e..2140914 100644
    if (wmtr_enabled()) {
      /* Blit commands carry only handles and scalars, so each struct travels
       * verbatim as {type, size, bytes}; the guest-pointer `next` is not sent.
-@@ -3952,6 +4265,12 @@ _MetalLayer_setProps(void *obj) {
+@@ -3952,6 +4269,12 @@ _MetalLayer_setProps(void *obj) {
  static NTSTATUS
  _MetalLayer_getProps(void *obj) {
    struct unixcall_generic_obj_ptr_noret *params = obj;
@@ -466,7 +471,7 @@ index 3f7974e..2140914 100644
    if (wmtr_enabled()) {
      struct WMTLayerProps got;
      if (wmtr_call(RM_OP_LAYER_GET_PROPS, 0, 0, &got, sizeof got, 0) == RM_OK) {
-@@ -4945,6 +5264,14 @@ _MTLLogContainer_enumerate(void *obj) {
+@@ -4945,6 +5268,14 @@ _MTLLogContainer_enumerate(void *obj) {
    uint64_t count = 0;
    uint64_t read = 0;
    id *buffer = params->buffer.ptr;
@@ -481,7 +486,7 @@ index 3f7974e..2140914 100644
    for (id _ in (id<MTLLogContainer>)params->enumeratable) {
      if (count >= params->start) {
        if (count < params->start + params->buffer_size) {
-@@ -5111,6 +5438,10 @@ static NTSTATUS
+@@ -5111,6 +5442,10 @@ static NTSTATUS
  _WMTGetDisplayDescription(void *obj) {
    struct unixcall_generic_obj_ptr_noret *params = obj;
    struct WMTDisplayDescription *desc_out = params->arg.ptr;
@@ -492,7 +497,7 @@ index 3f7974e..2140914 100644
  #if TARGET_OS_IOS
    (void)params;
    desc_out->maximum_edr_color_component_value = 1.0;
-@@ -5150,6 +5481,11 @@ _MetalLayer_getEDRValue(void *obj) {
+@@ -5150,6 +5485,11 @@ _MetalLayer_getEDRValue(void *obj) {
    struct unixcall_generic_obj_ptr_noret *params = obj;
    CAMetalLayer *layer = (CAMetalLayer *)params->handle;
    struct WMTEDRValue *value = params->arg.ptr;
@@ -505,10 +510,10 @@ index 3f7974e..2140914 100644
    value->maximum_potential_edr_color_component_value = 1.0;
  
 diff --git a/src/winemetal/winemetal_thunks.c b/src/winemetal/winemetal_thunks.c
-index c473702..c691e11 100644
+index c473702..443c393 100644
 --- a/src/winemetal/winemetal_thunks.c
 +++ b/src/winemetal/winemetal_thunks.c
-@@ -6,8 +6,15 @@
+@@ -6,8 +6,20 @@
  
  #include "winemetal_thunks.h"
  #include <wineunixlib.h>
@@ -521,12 +526,17 @@ index c473702..c691e11 100644
 + * that point (an at-terminate check in Run 1 reported stderr as fd=-1), so a
 + * diagnostic written there is silently lost. WARN goes through Wine's logging
 + * and is what produces the "warn: [present] ..." lines, which come from
-+ * d3d11_swapchain.cpp -- also PE code -- and do appear. */
-+#include <windef.h>
++ * d3d11_swapchain.cpp -- also PE code -- and do appear.
++ *
++ * Quotes, not angle brackets: windef.h resolves through Wine's own include
++ * path for this module, exactly as src/winemetal/main.c includes it in the same
++ * directory. <windef.h> searches the compiler's system include path instead and
++ * does not find it, which the build showed as 'windef.h file not found'. */
++#include "windef.h"
  
  /* ml761: top-level API census.
   *
-@@ -39,12 +46,40 @@ extern void wmt_api_census_note(unsigned code);
+@@ -39,12 +51,40 @@ extern void wmt_api_census_note(unsigned code);
    {                                                                                                                    \
      wmt_api_census_note(code);                                                                                         \
      NTSTATUS status = WINE_UNIX_CALL(code, params);                                                                    \
@@ -568,7 +578,7 @@ index c473702..c691e11 100644
  WINEMETAL_API void
  NSObject_retain(obj_handle_t obj) {
    UNIX_CALL(0, &obj);
-@@ -112,10 +147,27 @@ MTLDevice_name(obj_handle_t device) {
+@@ -112,10 +152,27 @@ MTLDevice_name(obj_handle_t device) {
  WINEMETAL_API uint32_t
  NSString_getCString(obj_handle_t str, char *buffer, uint64_t maxLength, enum WMTStringEncoding encoding) {
    struct unixcall_nsstring_getcstring params;
@@ -596,7 +606,7 @@ index c473702..c691e11 100644
    UNIX_CALL(8, &params);
    return params.ret;
  }
-@@ -230,6 +282,24 @@ MTLDevice_newDepthStencilState(obj_handle_t device, const struct WMTDepthStencil
+@@ -230,6 +287,24 @@ MTLDevice_newDepthStencilState(obj_handle_t device, const struct WMTDepthStencil
  WINEMETAL_API obj_handle_t
  MTLDevice_newTexture(obj_handle_t device, struct WMTTextureInfo *info) {
    struct unixcall_mtldevice_newtexture params;
@@ -621,7 +631,7 @@ index c473702..c691e11 100644
    params.device = device;
    WMT_MEMPTR_SET(params.info, info);
    UNIX_CALL(21, &params);
-@@ -730,6 +800,16 @@ MetalLayer_setProps(obj_handle_t layer, const struct WMTLayerProps *props) {
+@@ -730,6 +805,16 @@ MetalLayer_setProps(obj_handle_t layer, const struct WMTLayerProps *props) {
  WINEMETAL_API void
  MetalLayer_getProps(obj_handle_t layer, struct WMTLayerProps *props) {
    struct unixcall_generic_obj_ptr_noret params;
@@ -638,7 +648,7 @@ index c473702..c691e11 100644
    params.handle = layer;
    WMT_MEMPTR_SET(params.arg, props);
    UNIX_CALL(71, &params);
-@@ -791,6 +871,16 @@ MTLCommandBuffer_logs(obj_handle_t cmdbuf) {
+@@ -791,6 +876,16 @@ MTLCommandBuffer_logs(obj_handle_t cmdbuf) {
  WINEMETAL_API uint64_t
  MTLLogContainer_enumerate(obj_handle_t logs, uint64_t start, uint64_t buffer_size, obj_handle_t *buffer) {
    struct unixcall_enumerate params;
@@ -655,7 +665,7 @@ index c473702..c691e11 100644
    params.enumeratable = logs;
    params.start = start;
    params.buffer_size = buffer_size;
-@@ -838,6 +928,14 @@ WMTGetSecondaryDisplayId() {
+@@ -838,6 +933,14 @@ WMTGetSecondaryDisplayId() {
  WINEMETAL_API void
  WMTGetDisplayDescription(uint32_t display_id, struct WMTDisplayDescription *desc) {
    struct unixcall_generic_obj_ptr_noret params;
@@ -670,7 +680,7 @@ index c473702..c691e11 100644
    params.handle = display_id;
    WMT_MEMPTR_SET(params.arg, desc);
    UNIX_CALL(96, &params);
-@@ -845,7 +943,20 @@ WMTGetDisplayDescription(uint32_t display_id, struct WMTDisplayDescription *desc
+@@ -845,7 +948,20 @@ WMTGetDisplayDescription(uint32_t display_id, struct WMTDisplayDescription *desc
  
  WINEMETAL_API void
  MetalLayer_getEDRValue(obj_handle_t layer, struct WMTEDRValue *value) {
