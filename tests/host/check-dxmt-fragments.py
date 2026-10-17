@@ -131,6 +131,46 @@ else:
             print("note: mach/mach_time.h is not usable on this host, so "
                   "mach_absolute_time is declared by hand")
 
+        # The struct shapes must come from the header, not from what this file
+        # believes they are. It believed a dst_size member existed; it does not,
+        # and the build caught it. Reading the real declaration means a rename
+        # upstream is a rename here too.
+        real_hdr = os.path.join(ROOT, "dxmt", "src", "winemetal", "winemetal.h")
+        real_decls = ""
+        if os.path.exists(real_hdr):
+            h = open(real_hdr, encoding="utf-8", errors="replace").read()
+            for name in ("WMTMemoryPointer", "WMTOrigin", "WMTSize",
+                         "wmtcmd_blit_copy_from_texture_to_buffer",
+                         "wmtcmd_blit_copy_from_texture_to_texture"):
+                # Balanced brace scan: the real structs contain other structs, so
+                # a non-greedy [^}]* stops at the first closing brace and yields
+                # a truncated declaration that then compiles as something else.
+                m0 = re.search(r"struct\s+%s\s*\{" % re.escape(name), h)
+                decl = None
+                if m0:
+                    depth, j = 0, h.find("{", m0.start())
+                    k = j
+                    while k < len(h):
+                        if h[k] == "{":
+                            depth += 1
+                        elif h[k] == "}":
+                            depth -= 1
+                            if depth == 0:
+                                decl = h[m0.start():k + 1]
+                                break
+                        k += 1
+                check("the real %s is readable from winemetal.h" % name, decl is not None)
+                if decl:
+                    # C++ needs the terminating semicolon; the header omits it
+                    # because C does not.
+                    real_decls += decl.rstrip() + ";\n"
+        else:
+            # Without the submodule there is nothing to compare against; the
+            # header shapes are then the ones the patch expects, which is a
+            # weaker check and says so.
+            print("note: dxmt is not checked out, so the struct shapes cannot be "
+                  "compared against the real header")
+
         driver = (
             ('#include <stdint.h>\n#include <stddef.h>\n'
              '#include <stdio.h>\n#include <string.h>\n'
@@ -147,24 +187,14 @@ else:
              + ('' if have_mach else 'uint64_t mach_absolute_time(void);\n')
              + '#define stderr ((FILE *)0)\n')
             + 'typedef unsigned long obj_handle_t;\n'
-            'struct WMTMemoryPointer { void *ptr; };\n'
-            'struct wmtcmd_base { uint32_t type; struct WMTMemoryPointer next; };\n'
+            # The enum first: the real struct declarations name it, and they are
+            # read out of winemetal.h so that a field this file invented -- it
+            # invented a dst_size, which does not exist -- fails here rather than
+            # twenty minutes into an IPA build.
             'enum WMTBlitCommandType { WMTBlitCommandCopyFromTextureToBuffer,\n'
             '  WMTBlitCommandCopyFromTextureToTexture, WMTBlitCommandMax };\n'
-            'struct WMTOrigin { uint64_t x, y, z; };\n'
-            'struct WMTSize { uint64_t width, height, depth; };\n'
-            'struct wmtcmd_blit_copy_from_texture_to_buffer {\n'
-            '  enum WMTBlitCommandType type; uint16_t reserved[3];\n'
-            '  struct WMTMemoryPointer next; obj_handle_t src; uint32_t slice;\n'
-            '  uint32_t level; struct WMTOrigin origin; struct WMTSize size;\n'
-            '  obj_handle_t dst; };\n'
-            'struct wmtcmd_blit_copy_from_texture_to_texture {\n'
-            '  enum WMTBlitCommandType type; uint16_t reserved[3];\n'
-            '  struct WMTMemoryPointer next; obj_handle_t src; uint32_t src_slice;\n'
-            '  uint32_t src_level; struct WMTOrigin src_origin;\n'
-            '  struct WMTSize src_size; obj_handle_t dst; uint32_t dst_slice;\n'
-            '  uint32_t dst_level; struct WMTOrigin dst_origin;\n'
-            '  struct WMTSize dst_size; };\n'
+            + real_decls
+            + 'struct wmtcmd_base { uint32_t type; struct WMTMemoryPointer next; };\n'
             'static uint32_t wmt_blit_cmd_size(int t){return 0;}\n'
             + "\n".join(pieces) + "\nint main(void){return 0;}\n")
         with tempfile.TemporaryDirectory() as td:

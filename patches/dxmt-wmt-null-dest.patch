@@ -85,7 +85,7 @@ index db4ebbb..8d868cc 100644
    if (ret)
      return ret;
 diff --git a/src/winemetal/unix/winemetal_unix.c b/src/winemetal/unix/winemetal_unix.c
-index 3f7974e..fa9349e 100644
+index 3f7974e..7bf06a6 100644
 --- a/src/winemetal/unix/winemetal_unix.c
 +++ b/src/winemetal/unix/winemetal_unix.c
 @@ -18,6 +18,57 @@ static inline CGDirectDisplayID CGMainDisplayID(void) { return 1; }
@@ -314,7 +314,7 @@ index 3f7974e..fa9349e 100644
    MTLTextureDescriptor *desc = [[MTLTextureDescriptor alloc] init];
    fill_texture_descriptor(desc, info);
  
-@@ -2143,10 +2327,143 @@ static uint32_t wmt_blit_cmd_size(unsigned type) {
+@@ -2143,10 +2327,146 @@ static uint32_t wmt_blit_cmd_size(unsigned type) {
      }
  }
  
@@ -388,7 +388,10 @@ index 3f7974e..fa9349e 100644
 +        (const struct wmtcmd_blit_copy_from_texture_to_texture *)c;
 +      r->src = b->src; r->dst = b->dst;
 +      r->level = b->dst_level; r->slice = b->dst_slice;
-+      r->w = b->dst_size.width; r->h = b->dst_size.height; r->d = b->dst_size.depth;
++      /* The destination half of this struct carries origin, NOT size: the copy
++       * is the same size as the source, and there is no dst_size member. The
++       * build caught this before the IPA was produced. */
++      r->w = b->src_size.width; r->h = b->src_size.height; r->d = b->src_size.depth;
 +      r->valid = WMT_BLIT_SRC | WMT_BLIT_DST | WMT_BLIT_SIZE;
 +      break;
 +    }
@@ -458,7 +461,7 @@ index 3f7974e..fa9349e 100644
    if (wmtr_enabled()) {
      /* Blit commands carry only handles and scalars, so each struct travels
       * verbatim as {type, size, bytes}; the guest-pointer `next` is not sent.
-@@ -3952,6 +4269,12 @@ _MetalLayer_setProps(void *obj) {
+@@ -3952,6 +4272,12 @@ _MetalLayer_setProps(void *obj) {
  static NTSTATUS
  _MetalLayer_getProps(void *obj) {
    struct unixcall_generic_obj_ptr_noret *params = obj;
@@ -471,7 +474,7 @@ index 3f7974e..fa9349e 100644
    if (wmtr_enabled()) {
      struct WMTLayerProps got;
      if (wmtr_call(RM_OP_LAYER_GET_PROPS, 0, 0, &got, sizeof got, 0) == RM_OK) {
-@@ -4945,6 +5268,14 @@ _MTLLogContainer_enumerate(void *obj) {
+@@ -4945,6 +5271,14 @@ _MTLLogContainer_enumerate(void *obj) {
    uint64_t count = 0;
    uint64_t read = 0;
    id *buffer = params->buffer.ptr;
@@ -486,7 +489,7 @@ index 3f7974e..fa9349e 100644
    for (id _ in (id<MTLLogContainer>)params->enumeratable) {
      if (count >= params->start) {
        if (count < params->start + params->buffer_size) {
-@@ -5111,6 +5442,10 @@ static NTSTATUS
+@@ -5111,6 +5445,10 @@ static NTSTATUS
  _WMTGetDisplayDescription(void *obj) {
    struct unixcall_generic_obj_ptr_noret *params = obj;
    struct WMTDisplayDescription *desc_out = params->arg.ptr;
@@ -497,7 +500,7 @@ index 3f7974e..fa9349e 100644
  #if TARGET_OS_IOS
    (void)params;
    desc_out->maximum_edr_color_component_value = 1.0;
-@@ -5150,6 +5485,11 @@ _MetalLayer_getEDRValue(void *obj) {
+@@ -5150,6 +5488,11 @@ _MetalLayer_getEDRValue(void *obj) {
    struct unixcall_generic_obj_ptr_noret *params = obj;
    CAMetalLayer *layer = (CAMetalLayer *)params->handle;
    struct WMTEDRValue *value = params->arg.ptr;
