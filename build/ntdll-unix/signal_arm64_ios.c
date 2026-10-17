@@ -977,18 +977,20 @@ extern void ios_alert_waiter_dump(void); /* ml440 (#74): >60s parkers + their lo
 extern void wmt_blit_ring_dump(void) __attribute__((weak));
 extern int wmt_airconv_dump_last_dxbc(const char *dir) __attribute__((weak));
 
-/* Where to put the DXBC blob. The current directory, deliberately: ntdll does
- * not link Foundation and adding that dependency to the low-level module for a
- * crash-time path file would be a poor trade. A Wine guest runs with its
- * Documents directory as the working directory, so the blob lands beside the
- * app's other exported files. */
+/* Where to put the DXBC blob. An explicit Documents path rather than the
+ * current directory: iOS does not promise a usable CWD, and a blob written
+ * somewhere nobody looks is the same as no blob. HOME is what the app already
+ * exports and needs no Foundation, which ntdll does not link. The full path is
+ * logged when the file is written so it can be found without guessing. */
 static const char *
 ios_dxbc_dump_dir(void)
 {
     static char dir[512];
     if (!dir[0])
     {
-        if (!getcwd(dir, sizeof(dir))) return "";
+        const char *home = getenv("HOME");
+        if (!home || !*home) { fprintf(stderr, "[dxbc-dump] HOME is unset, no path\n"); return ""; }
+        snprintf(dir, sizeof(dir), "%s/Documents", home);
     }
     return dir;
 }
