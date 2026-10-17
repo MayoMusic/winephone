@@ -15571,16 +15571,77 @@ static void ios_band_gap( struct ios_band_piece *p, int n, uint64_t lo, uint64_t
     if (start < hi && hi - start > *gap) { *gap = hi - start; *gap_at = start; }
 }
 
+/* madeira-bcd [band-owner] ml1218: WHO holds the band's regions.
+ *
+ * The piece split above answers "which 16 GB slot", which for layout 0 is four
+ * identical slots and therefore names nobody. ROTTR.exe on iPhone18,3 (cores=2,
+ * 2026-10-17) shows the band going from 32806 regions and a 1149 MB largest gap
+ * to 43191 regions and a 3 MB one inside two minutes, and the game's own
+ * allocator then reports "Default Heap Allocator: Out of memory, requested
+ * 870240 bytes (1006569688 total free)" -- 959.9 MB free beside a 0.8 MB
+ * request. That is a fragmentation question and it needs an owner, not a slot.
+ *
+ * Exact where this file owns the range, so the line is a fact:
+ *   fex-arena   the published FEX arena bounds
+ *   jit-pool    the RW/RX aliases
+ *   swap        an extent the file tier recorded (va/len per extent)
+ * Heuristic where the only signal is the shape, and marked "~" in the line so a
+ * reader never has to guess which kind of claim they are reading:
+ *   thread-stack 0x802000, the size init_thread_stack reserves (its own
+ *                StackBase..StackLimit lines are 8 MB apart)
+ *   fex-code     0x1000000, FEX's INITIAL_CODE_SIZE (CPUBackend.cpp)
+ *   fex-callret  0x800000, CALLRET_STACK_SIZE (InternalThreadState.h)
+ *   fex-lookup   0x200000, the per-thread lookup cache ([lookup-cache] says
+ *                "alloc=2MB")
+ *   teb-tls      committed and small
+ * Everything else is "other" -- and that is the useful answer: a band whose
+ * "other" is the largest bucket is not being held by anything we can name.
+ *
+ * Costs nothing unless MADEIRA_BAND_CENSUS=1 already turned the walk on: same
+ * pass, one classifier call per region, and the buckets live on this frame.
+ */
+#define IOS_OWNER_MAX 10
+enum { IOS_OWN_FEX_ARENA, IOS_OWN_JIT_POOL, IOS_OWN_SWAP, IOS_OWN_THREAD_STACK,
+       IOS_OWN_FEX_CODE, IOS_OWN_FEX_CALLRET, IOS_OWN_FEX_LOOKUP, IOS_OWN_TEB_TLS,
+       IOS_OWN_OTHER };
+static const char *ios_owner_name[IOS_OWNER_MAX] = {
+    "fex-arena", "jit-pool", "swap", "~thread-stack", "~fex-code",
+    "~fex-callret", "~fex-lookup", "~teb-tls", "other", NULL
+};
+
+/* ml1218: see ios_swap_extent_covers(), defined next to the extent table ~5000
+ * lines below this one. */
+extern int ios_swap_extent_covers( uint64_t lo, uint64_t hi );
+
+static int ios_band_owner_of( uint64_t lo, uint64_t hi, uint64_t size, int prot )
+{
+    /* Exact: ranges this file published or recorded. */
+    if (ios_fex_arena_base_unix && lo >= (uint64_t)(uintptr_t)ios_fex_arena_base_unix &&
+        lo < (uint64_t)(uintptr_t)ios_fex_arena_end_unix) return IOS_OWN_FEX_ARENA;
+    if (ios_jit_rw_base_global && lo >= (uint64_t)(uintptr_t)ios_jit_rw_base_global &&
+        lo < (uint64_t)(uintptr_t)ios_jit_rw_base_global + ios_jit_pool_size_global) return IOS_OWN_JIT_POOL;
+    if (ios_swap_extent_covers( lo, hi )) return IOS_OWN_SWAP;
+
+    /* Heuristic: the size alone. */
+    if (size == 0x802000)  return IOS_OWN_THREAD_STACK;
+    if (size == 0x1000000) return IOS_OWN_FEX_CODE;
+    if (size == 0x800000)  return IOS_OWN_FEX_CALLRET;
+    if (size == 0x200000)  return IOS_OWN_FEX_LOOKUP;
+    if (size <= 0x10000 && prot) return IOS_OWN_TEB_TLS;
+    return IOS_OWN_OTHER;
+}
+
 static void ios_band_census( const char *why )
 {
     static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
     static uint64_t top_max[IOS_BAND_PIECES_MAX];
     static unsigned count;
     struct ios_band_piece p[IOS_BAND_PIECES_MAX];
+    unsigned orec[IOS_OWNER_MAX]; static uint64_t omap[IOS_OWNER_MAX], oseen[IOS_OWNER_MAX];
     uint64_t addr = IOS_BAND_LO, hi = IOS_BAND_HI, gap = 0, gap_at = 0, rw_lo, rw_hi;
     task_vm_info_data_t vmi;
     mach_msg_type_number_t vcnt = TASK_VM_INFO_COUNT;
-    unsigned walked = 0;
+    unsigned walked = 0, oi, slot;
     struct tm tm;
     time_t now;
     int i, n;
@@ -15588,6 +15649,7 @@ static void ios_band_census( const char *why )
     if (!ios_band_census_enabled() || pthread_mutex_trylock( &lock )) return;
     if (count >= 64) { pthread_mutex_unlock( &lock ); return; }
     count++;
+    for (slot = 0; slot < IOS_OWNER_MAX; slot++) { orec[slot] = 0; omap[slot] = 0; }
     rw_lo = (uint64_t)(uintptr_t)ios_jit_rw_base_global;
     rw_hi = rw_lo + ios_jit_pool_size_global;
     if (ios_jit_low_size_global)
@@ -15627,6 +15689,11 @@ static void ios_band_census( const char *why )
         ios_band_region( p, n, q > addr ? q : addr, end, info.protection,
                          (uint64_t)info.pages_resident << 14,
                          ((uint64_t)info.pages_dirtied + info.pages_swapped_out) << 14 );
+        /* ml1218: charge the same region to an owner (see ios_band_owner_of). */
+        oi = ios_band_owner_of( q > addr ? q : addr, end, end - (q > addr ? q : addr),
+                                info.protection );
+        orec[oi]++;
+        omap[oi] += end - (q > addr ? q : addr);
         addr = end;
         if (++walked >= 1000000)
         {
@@ -15653,6 +15720,31 @@ static void ios_band_census( const char *why )
                  (unsigned long long)(p[i].resident >> 20), (unsigned long long)(p[i].dirty >> 20),
                  (unsigned long long)(p[i].top >> 20), (unsigned long long)(top_max[i] >> 20),
                  (unsigned long long)(p[i].gap >> 20) );
+    }
+    /* ml1218: the same regions by owner, largest first. `~` marks a shape-based
+     * guess; the three without it are ranges this file published or recorded.
+     * Which bucket GREW is what names the culprit, so each carries its delta
+     * against the previous census rather than only its total. */
+    {
+        unsigned ord[IOS_OWNER_MAX], k, j;
+        uint64_t grew[IOS_OWNER_MAX];
+        for (k = 0; k < IOS_OWNER_MAX; k++) { ord[k] = k; grew[k] = 0; }
+        for (k = 1; k < IOS_OWNER_MAX; k++)            /* insertion sort, 10 buckets */
+        {
+            unsigned cur = ord[k];
+            for (j = k; j && omap[ord[j - 1]] < omap[cur]; j--) ord[j] = ord[j - 1];
+            ord[j] = cur;
+        }
+        for (k = 0; k < IOS_OWNER_MAX; k++) grew[k] = omap[k] > oseen[k] ? omap[k] - oseen[k] : 0;
+        for (k = 0; k < IOS_OWNER_MAX; k++)
+        {
+            unsigned b = ord[k];
+            if (!orec[b] && !omap[b]) continue;
+            dprintf( 2, "[band-owner] %-14s regions=%-7u mapped=%llu MB (grew %llu since the last census)\n",
+                     ios_owner_name[b], orec[b], (unsigned long long)(omap[b] >> 20),
+                     (unsigned long long)(grew[b] >> 20) );
+        }
+        for (k = 0; k < IOS_OWNER_MAX; k++) oseen[k] = omap[k];
     }
     pthread_mutex_unlock( &lock );
 }
@@ -20345,6 +20437,20 @@ static uint64_t ios_swap_cap, ios_swap_bump;
  * (ml1258). img: an image section's (madeira-bcd swap-images, ios_swap_image_map). */
 static struct { char *va; size_t len; uint64_t off; int resv; size_t key; uint64_t born; int img; } ios_swap_ext[16384];
 static unsigned ios_swap_n;
+
+/* madeira-bcd [band-owner] ml1218: is [lo, hi) inside one extent the file tier
+ * recorded? An accessor rather than a direct read of ios_swap_ext[], because the
+ * band census's owner classifier sits ~5000 lines ABOVE this table and the table
+ * is static. */
+int ios_swap_extent_covers( uint64_t lo, uint64_t hi )
+{
+    unsigned i;
+    for (i = 0; i < ios_swap_n; i++)
+        if (lo >= (uint64_t)(uintptr_t)ios_swap_ext[i].va &&
+            hi <= (uint64_t)(uintptr_t)ios_swap_ext[i].va + ios_swap_ext[i].len) return 1;
+    return 0;
+}
+
 static struct { uint64_t off, len; } ios_swap_free[8192];
 static unsigned ios_swap_nfree;
 static unsigned long long ios_swap_bytes, ios_swap_peak, ios_swap_backs, ios_swap_releases, ios_swap_unbacks, ios_swap_refused;

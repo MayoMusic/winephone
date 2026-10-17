@@ -92,6 +92,12 @@ static void add(uint64_t lo, uint64_t hi, int prot, unsigned res, unsigned dirty
   map[map_n].dirty = dirty; map[map_n].swapped = swapped; map_n++; }
 static int ios_sc_layout_mode = 2;
 static int ios_sc2_rdr2;
+/* ml1218 [band-owner]: the owner classifier reaches the FEX arena bounds and the
+ * swap tier's extent table, both defined far below the census in the real file.
+ * Stubbed here so the census still compiles standalone; both are 0/off, so every
+ * region in the harness classifies as a size heuristic. */
+ULONG_PTR ios_fex_arena_base_unix = 0, ios_fex_arena_end_unix = 0;
+int ios_swap_extent_covers(uint64_t lo, uint64_t hi) { (void)lo; (void)hi; return 0; }
 static void *ios_jit_rw_base_global = (void *)0x7900000000ull;
 static size_t ios_jit_pool_size_global = 0x52848000;
 static uintptr_t ios_jit_low_rw_global;
@@ -314,3 +320,31 @@ jumbo = jumbo[:jumbo.index('ios_va_gap_probe( "jumbo reserve failed" );')]
 assert jumbo.index('ios_jumbo_holdback_take( *size_ptr );') < jumbo.index('ios_band_census( "jumbo reserve failed" );') \
     < jumbo.index('if (probed++ < 2)'), 'the census runs at a failed large reserve, after the holdback was tried'
 print('PASS: the census runs with the periodic slot probe and at a failed large reserve after the holdback')
+
+# ml1218 [band-owner]: layout 0 is four identical 16 GB slots, so the pieces name
+# nobody and a fragmented band has no owner. The walk now charges each region to
+# one, and the lines carry a growth delta because which bucket GREW is the answer.
+for what, cond in [
+    ('the owner classifier sits with the census',
+     src.index('static int ios_band_owner_of(')
+     < src.index('static void ios_band_census( const char *why )\n{')),
+    ('every owner name is printed with its count and MB', '"[band-owner] %-14s regions=%-7u mapped=%llu MB' in src),
+    ('the three exact owners come from ranges this file published or recorded',
+     all(k in src for k in ('ios_fex_arena_end_unix', 'ios_jit_rw_base_global', 'ios_swap_extent_covers'))),
+    ('a shape-based guess is marked so a reader can tell it from a fact',
+     all(('"%s"' % n) in src for n in ('~thread-stack', '~fex-code', '~fex-callret', '~fex-lookup', '~teb-tls'))),
+    ('the owners are charged on the same pass the pieces use',
+     src.index('ios_band_region( p, n,') < src.index('ios_band_owner_of( q > addr ? q : addr') ),
+    ('the swap extent table is reached through an accessor, not a static read',
+     'int ios_swap_extent_covers( uint64_t lo, uint64_t hi )' in src
+     and 'extern int ios_swap_extent_covers' in src),
+    ('the growth delta is computed before the running totals are replaced',
+     src.index('grew[k] = omap[k] > oseen[k]') < src.index('oseen[k] = omap[k]')),
+    ('every enum member has a name, or a bucket prints as NULL',
+     len(re.findall(r'"([^"]+)"', re.search(r'ios_owner_name\[IOS_OWNER_MAX\] = \{(.*?)\};', src, re.S).group(1)))
+     == len(re.findall(r'IOS_OWN_[A-Z_]+',
+                       re.search(r'enum \{([^}]*IOS_OWN_[A-Z_, \n]*)\};', src).group(1)))),
+]:
+    print(('ok   ' if cond else 'FAIL ') + what)
+    assert cond, what
+print('PASS: the census attributes every region to an owner and reports which owner grew')
