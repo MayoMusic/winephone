@@ -49,18 +49,24 @@ pe = open(PE, encoding="utf-8", errors="replace").read()
 host = open(HOST, encoding="utf-8", errors="replace").read() if os.path.exists(HOST) else ""
 
 # --- PE-side diagnostics must use WARN, not stderr --------------------------
+# Strip comments before looking: these tags are named in prose explaining what
+# they are for, and the first textual match of [tex-bad-pe] is that comment, not
+# the call.
+pe_code = re.sub(r"/\*.*?\*/", "", pe, flags=re.S)
+pe_code = re.sub(r"//[^\n]*", "", pe_code)
+
 for tag in ("[tex-bad-pe]", "[wmt-fail]"):
-    at = pe.find(tag)
+    at = pe_code.find(tag)
     check("%s is present in the PE side" % tag, at >= 0)
     if at < 0:
         continue
-    line = pe[pe.rfind("\n", 0, at) + 1: pe.find("\n", at)]
+    line = pe_code[pe_code.rfind("\n", 0, at) + 1: pe_code.find("\n", at)]
     check("%s goes through WARN" % tag, line.lstrip().startswith("WARN("),
           line.strip()[:60])
 check("winemetal_thunks.c includes windef.h for WARN",
       re.search(r'#include\s*<windef\.h>', pe) is not None)
 check("the PE side has no diagnostic left on fprintf(stderr)",
-      re.search(r'fprintf\(stderr,\s*"\[(tex-bad-pe|wmt-fail)\]', pe) is None)
+      re.search(r'fprintf\(stderr,\s*"\[(tex-bad-pe|wmt-fail)\]', pe_code) is None)
 
 # --- the debug layer cannot be read from the environment at load ------------
 ctor = re.search(r'wmt_mtl_debug_early.*?\n\}', host, re.S)
@@ -71,10 +77,12 @@ if ctor:
     # word appears in prose. Checking the raw text flagged that explanation as a
     # violation of itself.
     code = re.sub(r"/\*.*?\*/", "", ctor.group(0), flags=re.S)
+    code = re.sub(r"//[^\n]*", "", code)
     check("it reads madeira_cfg, not getenv",
-          "madeira_cfg_int" in code and "getenv" not in code,
-          "getenv would always be empty: WineProcessBridge.m exports env.NAME "
-          "lines after this runs")
+          "madeira_cfg_int" in code
+          and not re.search(r'getenv\s*\(\s*"MADEIRA_MTL', code),
+          "getenv of the setting would always be empty: WineProcessBridge.m "
+          "exports env.NAME lines after this runs")
     check("it reports requested=0 as well as requested=1",
           "requested=0" in body and "requested=1" in body)
 
@@ -88,7 +96,33 @@ check("it uses the device class as the observable",
       re.search(r'object_getClassName', host) is not None,
       "MTLDebugDevice instead of MTLDevice is what the layer does to the class")
 
-# --- timestamps, so lines can be lined up with [footprint] ------------------
+# --- the PE route proves itself, so a missing diagnostic is never ambiguous -
+check("a PE self-test line exists", "[wmt-selftest]" in pe)
+check("the self-test runs at PE module load, not on first game call",
+      re.search(r'__attribute__\(\(constructor\)\)\s*static void\s*wmt_pe_log_selftest', pe)
+      is not None,
+      "it must fire whether or not the game ever calls an allocator")
+check("the self-test uses WARN too",
+      re.search(r'WARN\("\[wmt-selftest\]', pe) is not None)
+
+# --- a silent 'not found' must not look like 'layer off' -------------------
+if ctor:
+    code = re.sub(r"/\*.*?\*/", "", ctor.group(0), flags=re.S)
+    check("the load-time constructor reports the config path it read",
+          "madeira_cfg__dir" in code and "cfg-dir-source" in code,
+          "HOME and the Documents path may both be unresolvable at dylib load")
+    check("an unresolved path is reported as its own outcome",
+          "UNRESOLVED" in code,
+          "an unresolved path and a setting that is off are otherwise identical")
+    check("it says whether the file was found", "found=" in code)
+
+# --- NOT ACTIVE must come with a reason ------------------------------------
+check("NOT ACTIVE is explained, not just stated",
+      re.search(r'MTL_DEBUG_LAYER was set before this device was created', host) is not None)
+check("it reports whether the layer was set before creation",
+      "setBeforeCreation=" in host)
+check("it tells the reader to treat such a run as a baseline",
+      "baseline" in host)
 # [dxbc-dump] is emitted from airconv, a different file.
 AIRCONV = os.path.join(ROOT, "dxmt", "src", "airconv", "dxbc_converter.cpp")
 airconv = open(AIRCONV, encoding="utf-8", errors="replace").read() if os.path.exists(AIRCONV) else pe
