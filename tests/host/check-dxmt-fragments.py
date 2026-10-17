@@ -371,8 +371,6 @@ else:
 
             c_src = os.path.join(td, "frag.c")
             open(c_src, "w", encoding="utf-8").write(tu_c)
-            # DEBUG: keep a copy so the undeclared symbol can be located.
-            open("J:/tmp/opencode/tu_c.c", "w", encoding="utf-8").write(tu_c)
             # The language mode and warning set the real build uses for a C unit
             # (build/dxmt-ios/build.sh: COMMON_FLAGS -std=c11 -Wall plus the
             # MADEIRA_WARNINGS suppressions), minus the target. Matching -std is
