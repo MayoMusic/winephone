@@ -221,86 +221,81 @@ int main(void) {
 }
 ''' % predicate.group(0)
 
-cc = os.environ.get("CC") or shutil.which("clang") or shutil.which("cc")
-
-
-def host_cannot_link(stderr):
-    """True when the failure is this machine's toolchain, not our code.
-
-    A Windows box with only the Swift toolchain's clang has no Visual Studio
-    installation, so anything that needs a linker fails before it ever looks at
-    the source. That must not be reported as a passing test, and it must not be
-    reported as a broken predicate either.
-    """
-    low = (stderr or "").lower()
-    return any(s in low for s in (
-        "visual studio installation",
-        "program not executable",
-        "unable to find a tool",
-        "no such file or directory",
-        "cannot find -l",
-        "linker",
-    ))
-
-
-def env_link_failure(stderr):
-    """A link/SDK problem, as opposed to our source being wrong."""
-    low = (stderr or "").lower()
-    return any(s in low for s in (
-        "visual studio installation", "program not executable",
-        "unable to find a tool", "cannot find -l", "linker command failed",
-        "'ld' not found", "no such file or directory",
-    )) or not (stderr or "").strip()
-
-
 ran = False
 if os.environ.get("WMT_SKIP_COMPILE") == "1":
     print("SKIP the compiled truth table (WMT_SKIP_COMPILE=1); source "
           "assertions only, which cannot see a wrong predicate")
 else:
-    check("a C compiler is available", bool(cc), cc or "set CC=")
+    # A ladder, not a single guess. This test needs a HOST compiler: it links a
+    # trivial native program, so a cross or target compiler earlier on PATH
+    # would refuse. $CC wins if set; the system /usr/bin/cc and /usr/bin/clang
+    # come next because they are unambiguous, and a bare PATH lookup is the last
+    # resort rather than the first.
+    ladder = []
+    if os.environ.get("CC"):
+        ladder.append(os.environ["CC"])
+    for cand in ("/usr/bin/cc", "/usr/bin/clang", "cc", "clang"):
+        if os.path.isabs(cand):
+            if os.path.exists(cand):
+                ladder.append(cand)
+        else:
+            found = shutil.which(cand)
+            if found and found not in ladder:
+                ladder.append(found)
+    ladder = [c for c in ladder if c not in ladder[:ladder.index(c)]]  # dedupe, keep order
+    check("a C compiler is available", bool(ladder), ", ".join(ladder))
     check("the shipped predicate really is uint64_t (so the freestanding "
           "typedef below stands in for it)",
           "uint64_t count" in predicate.group(0))
-    if cc:
+
+    if ladder:
         with tempfile.TemporaryDirectory() as td:
             src = os.path.join(td, "null_dest.c")
             obj = os.path.join(td, "null_dest.o")
-            exe = os.path.join(td, "null_dest")
             open(src, "w", encoding="utf-8").write(DRIVER)
 
-            # Object-only build: needs no headers and no linker, so it runs even
-            # on a host whose toolchain cannot link a hosted program.
-            objrun = subprocess.run(
-                [cc, "-std=c99", "-Wall", "-Wextra", "-Werror", "-c", src, "-o", obj],
-                capture_output=True, text=True)
+            compiled = None
+            for cc in ladder:
+                r = subprocess.run(
+                    [cc, "-std=c99", "-Wall", "-Wextra", "-Werror", "-c", src, "-o", obj],
+                    capture_output=True, text=True)
+                if r.returncode == 0:
+                    compiled = cc
+                    break
             check("the predicate compiles clean (-Wall -Wextra -Werror)",
-                  objrun.returncode == 0,
-                  "" if objrun.returncode == 0
-                  else (objrun.stderr or "").strip()[:400])
+                  compiled is not None, compiled or "no compiler compiled it")
 
-            linkrun = subprocess.run([cc, "-std=c99", src, "-o", exe],
-                                     capture_output=True, text=True)
-            if linkrun.returncode == 0:
+            # Link and run down the same ladder. The object build needs no
+            # linker, so a host that can compile but not link still gets a real
+            # verification of the source.
+            last_link = (None, "")
+            for cc in ladder:
+                exe = os.path.join(td, "nd_" + os.path.basename(cc).replace(".", "_"))
+                link = subprocess.run([cc, "-std=c99", src, "-o", exe],
+                                      capture_output=True, text=True)
+                if link.returncode != 0:
+                    last_link = (cc, link.stderr or "")
+                    continue
                 run = subprocess.run([exe], capture_output=True, text=True)
                 got = run.returncode
                 for i, (name, _p, _c, want) in enumerate(CASES):
                     check("predicate: %s" % name, (got >> i) & 1 == want,
                           "got %d want %d" % ((got >> i) & 1, want))
-                check("the predicate's truth table holds", got == EXPECTED,
-                      "mask %d, expected %d" % (got, EXPECTED))
+                check("the predicate's truth table holds, executed by %s" % cc,
+                      got == EXPECTED, "mask %d, expected %d" % (got, EXPECTED))
                 ran = True
+                break
             else:
-                print("NOT RUN the truth table on this host: " +
-                      (linkrun.stderr or "").strip().splitlines()[-1][:140] if
-                      (linkrun.stderr or "").strip() else
-                      "NOT RUN the truth table on this host: no linker.")
-                print("            CI links and runs it. Until then the "
-                      "predicate is compile-verified only.")
+                cc_used, err = last_link
+                print("NOT RUN the truth table: no compiler on the ladder could "
+                      "link a hosted program.")
+                print("            last attempt was %s; its linker said:" % cc_used)
+                for line in err.strip().splitlines()[:12]:
+                    print("              %s" % line)
 
 if not ran and os.environ.get("WMT_SKIP_COMPILE") != "1":
-    print("note: the executed truth table did not run here. Treat the "
-          "predicate as compile-verified only until CI has run it.")
+    print("note: the executed truth table did not run. Treat the predicate as "
+          "compile-verified only.")
 
 # --- the block comment tells the truth -------------------------------------
 block = re.search(r"Null destination pointers.*?-{20,}", unix, re.S)
