@@ -970,6 +970,28 @@ int ios_beacon_teb_count;
 #define IOS_PUMP_MAX 4
 extern void ios_alert_ring_dump(void);   /* ml439 (#74): unix/sync.c alert-flow probe */
 extern void ios_alert_waiter_dump(void); /* ml440 (#74): >60s parkers + their lock words */
+
+/* winemetal / airconv crash dumps. Weak: those libraries are not necessarily
+ * in this process, and an unresolved symbol at fault time would turn a
+ * diagnostic into a second crash. */
+extern void wmt_blit_ring_dump(void) __attribute__((weak));
+extern int wmt_airconv_dump_last_dxbc(const char *dir) __attribute__((weak));
+
+/* Where to put the DXBC blob. The current directory, deliberately: ntdll does
+ * not link Foundation and adding that dependency to the low-level module for a
+ * crash-time path file would be a poor trade. A Wine guest runs with its
+ * Documents directory as the working directory, so the blob lands beside the
+ * app's other exported files. */
+static const char *
+ios_dxbc_dump_dir(void)
+{
+    static char dir[512];
+    if (!dir[0])
+    {
+        if (!getcwd(dir, sizeof(dir))) return "";
+    }
+    return dir;
+}
 void ios_pump_sample(void)
 {
     static int samples;
@@ -5544,6 +5566,15 @@ skip_reclaim_band: ;
                             "[mach_exc] sym pc=%s`%s+0x%llx lr=%s`%s+0x%llx\n",
                             pc_img, pc_sym, (unsigned long long)pc_off,
                             lr_img, lr_sym, (unsigned long long)lr_off);
+                        /* Two of the device faults are invisible from a fault
+                         * address: a dead Metal handle reached from a blit
+                         * command, and a NULL destination inside the SM5 parser.
+                         * Dump what was in flight. Both symbols are weak because
+                         * winemetal and airconv are not always loaded into this
+                         * process, and a missing dumper must not fault here. */
+                        if (wmt_blit_ring_dump) wmt_blit_ring_dump();
+                        if (wmt_airconv_dump_last_dxbc)
+                            wmt_airconv_dump_last_dxbc(ios_dxbc_dump_dir());
                         /* JIT-pool addresses: name the PE module + offset
                          * (same machinery as [thread-stacks]) so faults in
                          * copied PE code self-symbolize. */
