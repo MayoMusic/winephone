@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// The app's design tokens, in one place.
 ///
@@ -110,6 +111,53 @@ enum Theme {
     }
 
     // MARK: - Type
+
+    /// Arabic type.
+    ///
+    /// The brief names IBM Plex Sans Arabic, Readex Pro, Almarai and Cairo, and
+    /// asks for one of them rather than a substitute. This ships
+    /// IBM Plex Sans Arabic (Regular and SemiBold), OFL-1.1, whose licence is in
+    /// the bundle next to the fonts. It is registered in Info.plist under
+    /// `UIAppFonts`.
+    ///
+    /// A bundled family is looked up by PostScript name, and it is only found
+    /// if the font really is in the bundle: `didLoad` says so rather than
+    /// letting the app silently fall back to the system face and look correct
+    /// in English while rendering Arabic in something else.
+    enum Arabic {
+        static let family = "IBM Plex Sans Arabic"
+        static let regular = "IBMPlexSansArabic-Regular"
+        static let semibold = "IBMPlexSansArabic-SemiBold"
+
+        /// False when the bundle is missing the font, which is the one case in
+        /// this file worth surfacing: everything else degrades silently by
+        /// design, and a missing font would degrade silently too.
+        static let didLoad = UIFont(name: regular, size: 15) != nil
+
+        /// Arabic runs at the same optical size as the Latin beside it.
+        /// IBM Plex is not a rounded face, so `design: .rounded` is not offered
+        /// here; the geometric skeleton is close enough that the two sit
+        /// together without the Arabic looking like a different app.
+        static func title(_ size: CGFloat) -> SwiftUI.Font {
+            bundled(regular, size: size, fallback: .system(size: size, weight: .bold))
+        }
+
+        static func rowTitle(_ size: CGFloat = 17) -> SwiftUI.Font {
+            bundled(semibold, size: size, fallback: .system(size: size, weight: .medium))
+        }
+
+        static func body(_ size: CGFloat = 15) -> SwiftUI.Font {
+            bundled(regular, size: size, fallback: .system(size: size, weight: .regular))
+        }
+
+        /// The bundled face if it is there, the system face if it is not. The
+        /// second branch is the honest failure: same metrics, different
+        /// typeface, and `didLoad` is how you find out.
+        private static func bundled(_ name: String, size: CGFloat,
+                                    fallback: SwiftUI.Font) -> SwiftUI.Font {
+            UIFont(name: name, size: size).map(SwiftUI.Font.init) ?? fallback
+        }
+    }
 
     enum Font_ {
         /// Large page titles.

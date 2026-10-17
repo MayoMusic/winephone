@@ -2482,13 +2482,44 @@ struct LibraryView: View {
         // names stay for VoiceOver.
         TabView(selection: Binding(get: { tab }, set: { switchTab(to: $0) })) {
             library
-                .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
-                .tabItem { Image(systemName: "square.grid.2x2.fill").accessibilityLabel("Library") }
+                .appBackground()
+                .tabItem {
+                    // The brief asks for a label under each icon and for the
+                    // active tab to be a FILL, not a tint, so the two symbols
+                    // differ rather than one symbol being coloured twice.
+                    VStack(spacing: 2) {
+                        TabIcon(outlined: "square.grid.2x2", filled: "square.grid.2x2.fill",
+                                isSelected: tab == 0)
+                        Text("Library")
+                            .font(Theme.Font_.tabLabel)
+                            .foregroundStyle(tab == 0 ? Theme.Palette.primaryText
+                                                      : Theme.Palette.secondaryText)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Library")
+                }
                 .tag(0)
             settings
-                .tabItem { Image(systemName: "gearshape.fill").accessibilityLabel("Settings") }
+                .appBackground()
+                .tabItem {
+                    VStack(spacing: 2) {
+                        TabIcon(outlined: "gearshape", filled: "gearshape.fill",
+                                isSelected: tab == 1)
+                        Text("Settings")
+                            .font(Theme.Font_.tabLabel)
+                            .foregroundStyle(tab == 1 ? Theme.Palette.primaryText
+                                                      : Theme.Palette.secondaryText)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Settings")
+                }
                 .tag(1)
         }
+        // Near-black bar with a hairline along its top edge, per the brief. The
+        // system bar draws its own material on iOS 26, and .toolbarBackground
+        // is what replaces it with a flat colour of ours.
+        .toolbarBackground(Theme.Palette.bgBottom, for: .tabBar)
+        .toolbarBackground(.visible, for: .tabBar)
         // The system search field (Liquid Glass on iOS 26) in the title's place, left
         // of the library's buttons, on both tabs; each tab keeps its own text.
         .background(LibraryNavSearch(text: tab == 0 ? $search : $settingsSearch,
@@ -2580,6 +2611,11 @@ struct LibraryView: View {
     }
     private var settings: some View {
         Form {
+            // The brief wants the settings list on the app's own near-black
+            // gradient, not the system's grouped background, so the gradient is
+            // applied per section rather than to the page: a Form's own
+            // background is drawn behind its scroll view and does not reach the
+            // safe areas, which is why the tab bar's siblings each carry it.
             // The status sits on the page, not in a card; JIT is enabled from the
             // toolbar's Enable JIT button.
             if settingsShow("ready to play", "JIT", "Memory+", "StikDebug", "status") {
@@ -2644,6 +2680,12 @@ struct LibraryView: View {
                 }
             }
         }
+        // The app's own background and section shape, replacing the system's
+        // grouped list. scrollContentBackground(.hidden) is what stops Form
+        // from painting its own background over the gradient underneath.
+        .scrollContentBackground(.hidden)
+        .background(Theme.background.ignoresSafeArea())
+        .tint(Theme.Palette.primaryText)
         .alert("Restart Madeira", isPresented: $restartNotice) {
             Button("OK", role: .cancel) {}
         } message: {
