@@ -139,23 +139,22 @@ check("the URL scheme is untouched", "madeira" in plist,
 check("the release contract's IPA name is untouched",
       re.search(r"PRODUCT_NAME\s*=\s*\"\$\(TARGET_NAME\)\"", pbx) is not None)
 
-# --- the Arabic font, registered all the way -------------------------------
-FONTS = ["IBMPlexSansArabic-Regular.ttf", "IBMPlexSansArabic-SemiBold.ttf"]
-for f in FONTS:
-    check("%s is in the bundle source" % f, os.path.exists(os.path.join(APP, "Fonts", f)))
-    check("%s is listed in UIAppFonts" % f, "<string>%s</string>" % f in plist)
-    check("%s is in the Resources build phase" % f,
-          re.search(r"%s in Resources \*/ = \{isa = PBXBuildFile" % re.escape(f), pbx) is not None)
-check("the font's OFL licence ships beside it",
-      any(f.startswith("IBM-Plex") or f == "OFL.txt"
-          for f in os.listdir(os.path.join(APP, "Fonts"))),
-      str(os.listdir(os.path.join(APP, "Fonts"))))
-check("the family name is the one the brief named",
-      'family = "IBM Plex Sans Arabic"' in theme)
-check("the PostScript name UIFont looks up is the real one",
-      'regular = "IBMPlexSansArabic-Regular"' in theme)
-check("a missing font cannot pass unnoticed",
-      "didLoad" in theme, "otherwise Arabic silently falls back to the system face")
+# --- English only ------------------------------------------------------------
+# The app is English-only by decision, and there is no localization to localize.
+# The Arabic face that briefly shipped was removed; these assert it stays
+# removed, because an accidental re-add puts ~480 KB of unused font and its
+# licence in the bundle for text that does not exist.
+fonts_dir = os.path.join(APP, "Fonts")
+check("no Fonts directory is shipped", not os.path.isdir(fonts_dir), fonts_dir)
+check("UIAppFonts lists nothing", "UIAppFonts" not in plist)
+check("no Plex font is registered in the project",
+      not re.search(r"IBMPlex|IBM-Plex", pbx))
+check("the theme has no Arabic font lookup to fall through",
+      "IBM Plex" not in theme and "didLoad" not in theme)
+check("there is still no localization to translate",
+      not any(f.endswith(".lproj") for f in os.listdir(APP)) and
+      not re.search(r"AppleLanguages|CFBundleLocalizations", plist),
+      "a .lproj or a language list would need translating, not just fonts")
 
 # --- GlassSkin stays out of the active path ---------------------------------
 setting = re.search(r'@Published var on = MadeiraConfig\.flag\("MADEIRA_LIQUID_METAL",\s*'
