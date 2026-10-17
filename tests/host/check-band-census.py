@@ -96,7 +96,10 @@ static int ios_sc2_rdr2;
  * swap tier's extent table, both defined far below the census in the real file.
  * Stubbed here so the census still compiles standalone; both are 0/off, so every
  * region in the harness classifies as a size heuristic. */
-ULONG_PTR ios_fex_arena_base_unix = 0, ios_fex_arena_end_unix = 0;
+/* uintptr_t, not ULONG_PTR: the harness includes <stdint.h> and does not
+ * include any Windows header, so Wine's spelling of the type is not in scope.
+ * The real file spells it ULONG_PTR; the two are the same width. */
+uintptr_t ios_fex_arena_base_unix = 0, ios_fex_arena_end_unix = 0;
 int ios_swap_extent_covers(uint64_t lo, uint64_t hi) { (void)lo; (void)hi; return 0; }
 static void *ios_jit_rw_base_global = (void *)0x7900000000ull;
 static size_t ios_jit_pool_size_global = 0x52848000;
