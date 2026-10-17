@@ -905,7 +905,14 @@ def scan():
     # The engine code that acts on an option describes it better than the
     # Settings UI that merely reads it back: prefer sites outside app/.
     for o in opts.values():
-        sites = sorted(o.pop("sites"), key=lambda s: (s[0].startswith("app/"), s[0], s[1]))
+        # Normalise to '/' BEFORE the sort, not after: the sort prefers sites
+        # outside app/, and that test is a string match on "app/", so on a host
+        # whose separator is '\' it never fired and the preference was silently
+        # inverted. Doing it here also makes the emitted `sources` identical on
+        # every host, which is what lets --check run anywhere instead of only on
+        # a machine whose paths happen to match the committed file.
+        sites = sorted(((p.replace("\\", "/"), ln, n) for p, ln, n in o.pop("sites")),
+                       key=lambda s: (s[0].startswith("app/"), s[0], s[1]))
         o["category"] = category(sites[0][0])
         o["note"] = next((n for _, _, n in sites if n), "")
         files = []

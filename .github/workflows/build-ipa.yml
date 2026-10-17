@@ -269,6 +269,8 @@ jobs:
         run: python3 tests/host/check-app-assets.py
       - name: Check app-theme
         run: python3 tests/host/check-app-theme.py
+      - name: Check config-catalog
+        run: python3 tests/host/check-config-catalog.py
       - name: Check audio-downmix
         run: python3 tests/host/check-audio-downmix.py
       - name: Check audio-wow64
