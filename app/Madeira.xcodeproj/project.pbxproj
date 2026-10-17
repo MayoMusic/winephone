@@ -18,9 +18,6 @@
 		A1000910 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A2000910 /* Assets.xcassets */; };
 		A1000902 /* GlassSkin.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000902 /* GlassSkin.swift */; };
 		A1000A01 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000A01 /* Theme.swift */; };
-		A1000A03 /* IBMPlexSansArabic-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = A2000A03 /* IBMPlexSansArabic-Regular.ttf */; };
-		A1000A04 /* IBMPlexSansArabic-SemiBold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = A2000A04 /* IBMPlexSansArabic-SemiBold.ttf */; };
-		A1000A05 /* IBM-Plex-Sans-Arabic-OFL.txt in Resources */ = {isa = PBXBuildFile; fileRef = A2000A05 /* IBM-Plex-Sans-Arabic-OFL.txt */; };
 		A1000903 /* LiquidMetalSkin.metal in Sources */ = {isa = PBXBuildFile; fileRef = A2000903 /* LiquidMetalSkin.metal */; };
 		A1000904 /* AmbientGlow.metal in Sources */ = {isa = PBXBuildFile; fileRef = A2000904 /* AmbientGlow.metal */; };
 		A1000601 /* SteamOwnedLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000601 /* SteamOwnedLibrary.swift */; };
@@ -193,10 +190,6 @@
 		A2000910 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A2000902 /* GlassSkin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "GlassSkin.swift"; sourceTree = "<group>"; };
 		A2000A01 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Theme.swift"; sourceTree = "<group>"; };
-		A2000A02 /* Fonts */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Fonts; sourceTree = "<group>"; };
-		A2000A03 /* IBMPlexSansArabic-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Fonts/IBMPlexSansArabic-Regular.ttf"; sourceTree = "<group>"; };
-		A2000A04 /* IBMPlexSansArabic-SemiBold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Fonts/IBMPlexSansArabic-SemiBold.ttf"; sourceTree = "<group>"; };
-		A2000A05 /* IBM-Plex-Sans-Arabic-OFL.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "Fonts/IBM-Plex-Sans-Arabic-OFL.txt"; sourceTree = "<group>"; };
 		A2000903 /* LiquidMetalSkin.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = "LiquidMetalSkin.metal"; sourceTree = "<group>"; };
 		A2000904 /* AmbientGlow.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = "AmbientGlow.metal"; sourceTree = "<group>"; };
 		A2000601 /* SteamOwnedLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SteamOwnedLibrary.swift"; sourceTree = "<group>"; };
@@ -416,10 +409,6 @@
 				A2000910 /* Assets.xcassets */,
 				A2000902 /* GlassSkin.swift */,
 				A2000A01 /* Theme.swift */,
-				A2000A02 /* Fonts */,
-				A2000A03 /* IBMPlexSansArabic-Regular.ttf */,
-				A2000A04 /* IBMPlexSansArabic-SemiBold.ttf */,
-				A2000A05 /* IBM-Plex-Sans-Arabic-OFL.txt */,
 				A2000903 /* LiquidMetalSkin.metal */,
 				A2000904 /* AmbientGlow.metal */,
 				A2000601 /* SteamOwnedLibrary.swift */,
@@ -679,9 +668,6 @@
 				A1000040 /* prefix-template.tar.gz in Resources */,
 				A1000094 /* cacert.pem in Resources */,
 				A1000910 /* Assets.xcassets in Resources */,
-				A1000A03 /* IBMPlexSansArabic-Regular.ttf in Resources */,
-				A1000A04 /* IBMPlexSansArabic-SemiBold.ttf in Resources */,
-				A1000A05 /* IBM-Plex-Sans-Arabic-OFL.txt in Resources */,
 				B1000004 /* madeira-jit.js in Resources */,
 				B1000051 /* Madeira JIT.shortcut in Resources */,
 			);

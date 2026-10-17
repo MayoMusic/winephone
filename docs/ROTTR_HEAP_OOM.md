@@ -152,12 +152,58 @@ vtables, so a slot histogram over the singleton's call sites
 (`tools/pe-slot-histogram.py`: `+0x98` 2760, `+0x90` 1622) ranks the entry
 points without naming the failure path.
 
-**The counter has no 64-bit reader.** `0x38` is written with `addq` and set with
-`movq %r15, 0x38(%r14)`, and a scan of the whole `.text` finds **no** 64-bit
-`movq 0x38(reg), reg` — the 5644 hits are 32-bit `movl` of a different field.
-So either the value reaches the reporter through a chain the signature scan does
-not follow, or `0x38` is not the field the reporter prints. That is where this
-stops.
+**The counter has no 64-bit reader — this was wrong, and it stopped the search.**
+`0x38` is written with `addq` and set with `movq`, and a scan of the whole
+`.text` finds no 64-bit `movq 0x38(reg), reg`. That looked conclusive and it
+sent several rounds down the wrong road. It is an artefact of the **width**: the
+reporter takes the value 32-bit, `movl %r8d, %ebp` at `0x1403c4b3a`, and the
+`movl 0x38(%reg), %r8d` hits a scanner found are the same width, not a different
+field. Searching only for `movq` found nothing because nothing is 64-bit.
+
+Two more corrections from the same round:
+
+- **The vtable has 39 entries, not 30.** It was read as ending at slot `+0xe8`,
+  which made slot `+0xf0` look out of bounds. It exists, and it is the one that
+  matters.
+- **`pe-dataval-refs.py` skipped `FF 15` and `FF 25`**, so every indirect call
+  through an IAT slot was invisible to it. It reported "0 references" for a slot
+  the disassembly shows being called. That is the third time a tool here
+  returned a confident zero and the zero was the bug.
+
+## The path to the refusal, as far as it is traced
+
+The reporter is reached only through the vtable, and the chain is now named:
+
+```
+slot +0xf0  -> 0x1403c4ed0   the allocation entry point
+                  cmpb $0, this+0x51      lock flag
+                  EnterCriticalSection(this+0x58)
+                  movq this+0x48, %rcx   current block
+                  call   0x1403c6a60      <- the decision
+                  LeaveCriticalSection
+              returns NULL
+slot +0x98  -> 0x1403c4b20   the reporter, only when:
+                  call *0xd0(this) == 0        a global gate
+                  cmpb $0, this+0x52            the ready flag
+```
+
+`0x1403c6a60` is the real allocator and where "cannot satisfy this" must live.
+Its first instructions round the request up by a header and a fixed 8 and
+compare the result against 32:
+
+```1403c6a75: leal 0x7(%rdx), %ecx        size + 8
+1403c6a7d: addl 0x820(%rbp), %ecx      + the block header
+1403c6a89: cmpl $0x20, %ecx            against a 32-byte floor
+```
+
+It has **not** been disassembled past that point. Everything above is read from
+the binary; nothing below the compare is.
+
+Two consequences worth keeping: the report is **suppressible** — `this+0x52`
+being clear makes the reporter return without asserting, which is a real patch
+lever and also says the allocator asserts only once it believes it is live — and
+the refusal is reached through a **non-virtual** call, so it has ordinary direct
+call sites that a signature scan can find.
 
 **What would settle it**, in order of cost:
 

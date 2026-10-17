@@ -64,11 +64,6 @@
 	<true/>
 	<key>UIFileSharingEnabled</key>
 	<true/>
-	<key>UIAppFonts</key>
-	<array>
-		<string>IBMPlexSansArabic-Regular.ttf</string>
-		<string>IBMPlexSansArabic-SemiBold.ttf</string>
-	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UIRequiredDeviceCapabilities</key>
