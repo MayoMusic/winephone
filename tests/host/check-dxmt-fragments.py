@@ -67,6 +67,22 @@ for m in re.finditer(r"^(static\s+(?:NTSTATUS|int|void|const void|uint32_t)[^\n(
 check("no return type is stranded above a comment block",
       not any("return type is not stranded" in f for f in failures))
 
+# The driver has two header branches -- with libc headers and without -- and the
+# PE logging block needs va_start/va_end, which come from <stdarg.h>. Fixing that
+# in one branch and not the other passes here (this host has no libc headers, so
+# only the fallback is ever built) and fails on the macOS runner. So both are
+# asserted by name rather than by one of them happening to run.
+_src = open(os.path.abspath(__file__), encoding="utf-8").read()
+# Counted as the driver's own prefix literal, not as the string "#include
+# <stdarg.h>" -- the assertion below contains that text twice and would count
+# itself.
+_hdr = "#include <stdint.h>\\n#include <stddef.h>\\n#include <stdarg.h>\\n"
+check("<stdarg.h> is in both header branches of the driver",
+      _src.count(_hdr) == 2,
+      "found %d of 2; only the branch that runs locally has ever been compiled "
+      "here, so the other one is unchecked otherwise"
+      % _src.count(_hdr))
+
 # --- 2. includes are spelled the way the directory spells them --------------
 thunks = os.path.join(ROOT, "dxmt", "src", "winemetal", "winemetal_thunks.c")
 main_c = os.path.join(ROOT, "dxmt", "src", "winemetal", "main.c")
@@ -80,6 +96,13 @@ if os.path.exists(thunks) and os.path.exists(main_c):
         check("winemetal_thunks.c does not include %s with angle brackets" % header,
               bad is None,
               "angle brackets search the compiler's system path" if bad else "")
+    # And the reverse of what this file asserted until the build contradicted
+    # it: the PE side cannot have windef.h at all. Wineunixlib.h resolves because
+    # the toolchain has winternl.h; windef.h is Wine's name and is absent, which
+    # is why the logging route is implemented in the file instead of included.
+    check("winemetal_thunks.c does not try to include Wine's windef.h",
+          re.search(r'#include\s*[<"]windef\.h[>"]', thunks_text) is None,
+          "the LLVM-mingw toolchain headers do not have it; the build said so twice")
 
 # --- 3. the new declarations compile ---------------------------------------
 cc = os.environ.get("CC") or shutil.which("clang") or shutil.which("cc")
@@ -98,7 +121,18 @@ else:
     m = re.search(r"(#define WMT_BLIT_RING.*?\n\}\n)", added_text, re.S)
     if m:
         pieces.append(m.group(1))
-    check("the self-contained additions were found to compile", len(pieces) == 2, "got %d of 2 pieces; the extractors must keep up with the patch text" % len(pieces))
+    # The PE-side logging route. This one was missing while three errors in the
+    # PE file got through to a build: windef.h, and then, after that was
+    # "fixed" wrongly, an include the toolchain does not have. It is compiled
+    # here too, and needs no Wine header -- it declares what it uses.
+    m = re.search(r"(extern void \*__stdcall GetModuleHandleA.*?"
+                  r"#define WARN\(\.\.\.\) wmt_pe_warn\(__VA_ARGS__\))",
+                  added_text, re.S)
+    if m:
+        pieces.append(m.group(1))
+    else:
+        pieces.append("")   # keep the count honest rather than compiling less
+    check("the self-contained additions were found to compile", len(pieces) == 3, "got %d of 3 pieces; the extractors must keep up with the patch text" % len(pieces))
     if pieces:
         # This host's clang has no libc headers, so stdio/string are declared
         # directly and only the declarations this patch adds are checked. On a
@@ -190,11 +224,11 @@ else:
                 '  uint32_t dst_level; struct WMTOrigin dst_origin; };\n')
 
         driver = (
-            ('#include <stdint.h>\n#include <stddef.h>\n'
+            ('#include <stdint.h>\n#include <stddef.h>\n#include <stdarg.h>\n'
              '#include <stdio.h>\n#include <string.h>\n'
              + ('#include <mach/mach_time.h>\n' if have_mach else '')
              if have_libc else
-             '#include <stdint.h>\n#include <stddef.h>\n'
+             '#include <stdint.h>\n#include <stddef.h>\n#include <stdarg.h>\n'
              'typedef struct { int dummy; } FILE;\n'
              'FILE *fopen(const char *, const char *);\n'
              'size_t fwrite(const void *, size_t, size_t, FILE *);\n'
@@ -202,6 +236,17 @@ else:
              'int fprintf(FILE *, const char *, ...);\n'
              'int snprintf(char *, size_t, const char *, ...);\n'
              'void *memset(void *, int, size_t);\n'
+             # The PE logging block is C and needs va_list and the string
+             # functions. __builtin_va_list is the compiler's own, so it is
+             # available without a header; __SIZE_TYPE__ is size_t for whichever
+             # target is being compiled for, which is what vsnprintf wants.
+             'typedef __SIZE_TYPE__ wmt_size_t;\n'
+             'int vsnprintf(char *, wmt_size_t, const char *, va_list);\n'
+             'void *memcpy(void *, const void *, wmt_size_t);\n'
+             'wmt_size_t strlen(const char *);\n'
+             # NULL is not redefined: stddef.h is compiler-provided and resolves
+             # without libc, so it already has one. Defining it here collided
+             # with __stddef_null.h.
              + ('' if have_mach else 'uint64_t mach_absolute_time(void);\n')
              + '#define stderr ((FILE *)0)\n')
             + 'typedef unsigned long obj_handle_t;\n'

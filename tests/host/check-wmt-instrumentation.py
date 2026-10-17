@@ -77,10 +77,19 @@ for tag in ("[tex-bad-pe]", "[wmt-fail]"):
     line = pe_code[pe_code.rfind("\n", 0, at) + 1: pe_code.find("\n", at)]
     check("%s goes through WARN" % tag, line.lstrip().startswith("WARN("),
           line.strip()[:60])
-check("winemetal_thunks.c includes windef.h for WARN",
-      re.search(r'#include\s*"windef\.h"', pe) is not None,
-      "quotes, like src/winemetal/main.c in the same directory: angle brackets "
-      "search the compiler's system path and do not find Wine's headers")
+check("winemetal_thunks.c does not include windef.h",
+      re.search(r'#include\s*[<"]windef\.h[>"]', pe) is None,
+      "the PE side is built against the LLVM-mingw toolchain headers, which have "
+      "winternl.h but not Wine's windef.h; the build reported 'windef.h file not "
+      "found' for both spellings, which is how the toolchain was identified")
+check("winemetal_thunks.c reaches Wine's log directly",
+      "GetProcAddress" in pe and "__wine_dbg_output" in pe,
+      "this is what Logger::warn calls in src/util/log/log.cpp, and it is what "
+      "puts [present] from d3d11_swapchain.cpp -- also PE code -- in the log")
+check("the PE log route reports whether it resolved",
+      re.search(r'wmt_pe_log_route_ok\(\)\s*\?\s*"OK"\s*:\s*"UNRESOLVED"', pe) is not None,
+      "a self-test that claims success without checking is the failure this "
+      "whole file exists to prevent")
 check("the PE side has no diagnostic left on fprintf(stderr)",
       re.search(r'fprintf\(stderr,\s*"\[(tex-bad-pe|wmt-fail)\]', pe_code) is None)
 

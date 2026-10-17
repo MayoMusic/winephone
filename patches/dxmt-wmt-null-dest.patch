@@ -513,10 +513,10 @@ index 3f7974e..7bf06a6 100644
    value->maximum_potential_edr_color_component_value = 1.0;
  
 diff --git a/src/winemetal/winemetal_thunks.c b/src/winemetal/winemetal_thunks.c
-index c473702..443c393 100644
+index c473702..c728a63 100644
 --- a/src/winemetal/winemetal_thunks.c
 +++ b/src/winemetal/winemetal_thunks.c
-@@ -6,8 +6,20 @@
+@@ -6,8 +6,115 @@
  
  #include "winemetal_thunks.h"
  #include <wineunixlib.h>
@@ -524,22 +524,117 @@ index c473702..443c393 100644
 -#include "string.h"
 +#include <assert.h>
 +#include <string.h>
-+/* WARN is the logging route that survives to the log file from PE code.
-+ * fprintf(stderr) does not: the guest's stdout/stderr handles can be closed at
-+ * that point (an at-terminate check in Run 1 reported stderr as fd=-1), so a
-+ * diagnostic written there is silently lost. WARN goes through Wine's logging
-+ * and is what produces the "warn: [present] ..." lines, which come from
-+ * d3d11_swapchain.cpp -- also PE code -- and do appear.
++#include <stdio.h>
++#include <stdarg.h>
++
++/* --- logging that survives to the log file, from PE code --------------------
 + *
-+ * Quotes, not angle brackets: windef.h resolves through Wine's own include
-+ * path for this module, exactly as src/winemetal/main.c includes it in the same
-+ * directory. <windef.h> searches the compiler's system include path instead and
-+ * does not find it, which the build showed as 'windef.h file not found'. */
-+#include "windef.h"
++ * fprintf(stderr) does not survive: the guest's stdout/stderr handles can be
++ * closed by the time a crash is reported (an at-terminate check in Run 1 saw
++ * stderr as fd=-1), so a diagnostic written there is silently lost.
++ *
++ * dxmt's own WARN does survive, and it is not stderr that saves it. WARN is a
++ * C++ macro (src/util/log/log.hpp) whose sink, src/util/log/log.cpp, resolves
++ * __wine_dbg_output out of ntdll on first use and calls it. That is what puts
++ * "warn: [present] ..." from d3d11_swapchain.cpp into a device log, and that
++ * file is PE code built in this same build from this same toolchain.
++ *
++ * This file is C, so it cannot include log.hpp. It also cannot include
++ * windef.h, which is where Wine declares WARN: the PE side is compiled against
++ * the LLVM-mingw toolchain's headers, which do provide winternl.h -- so
++ * wineunixlib.h resolves -- but windef.h is Wine's own name and is not there.
++ * The build reported 'windef.h file not found' for <windef.h> and for
++ * "windef.h" alike, which is what identified the toolchain as the cause.
++ *
++ * So the same route is implemented directly: resolve the one Wine entry point,
++ * prefix as log.cpp does, hand it on. The two kernel32 functions are declared
++ * here rather than pulled from <windows.h>, because this file already includes
++ * wineunixlib.h and adding windows.h beside it is a second chance for two
++ * header sets to disagree about a type. Both names come from kernel32's import
++ * library, so this links.
++ */
++extern void *__stdcall GetModuleHandleA(const char *);
++extern void *__stdcall GetProcAddress(void *, const char *);
++
++typedef void (__stdcall *WMT_PFN_dbg_output)(const char *);
++
++#define WMT_PE_WARN_PREFIX "warn:  "
++#define WMT_PE_WARN_MAX 1024
++
++static WMT_PFN_dbg_output wmt_pe_dbg_output(void)
++{
++    /* Resolved once, unlocked. Two threads racing here both call
++     * GetProcAddress and both store the same value, so this is benign: it can
++     * make a diagnostic slower, never wrong. A lock would be a real
++     * dependency on a PE-side lock this file does not otherwise have. */
++    static WMT_PFN_dbg_output s_out;
++    static int s_tried;
++    if (!s_tried) {
++        void *ntdll;
++        s_tried = 1;
++        ntdll = GetModuleHandleA("ntdll.dll");
++        if (ntdll)
++            s_out = (WMT_PFN_dbg_output)GetProcAddress(ntdll, "__wine_dbg_output");
++    }
++    return s_out;
++}
++
++/* Whether the route exists, so a caller can tell "printed" from "lost" rather
++ * than assuming. The self-test reports this instead of claiming success. */
++static int wmt_pe_log_route_ok(void)
++{
++    return wmt_pe_dbg_output() != NULL;
++}
++
++/* Assembles one line and hands it to Wine's log. Returns 1 if it got there.
++ *
++ * Every format string in this file is a literal with at most six numeric
++ * fields, so nothing here approaches the 1024-byte body; a line that somehow
++ * did is marked "[truncated]" rather than silently cut, because a diagnostic
++ * that stops halfway is worse than one that says it stopped. */
++static int wmt_pe_warn(const char *fmt, ...)
++{
++    char body[WMT_PE_WARN_MAX];
++    char line[WMT_PE_WARN_MAX + 32];
++    size_t off, n;
++    va_list args;
++    WMT_PFN_dbg_output out = wmt_pe_dbg_output();
++    int written;
++
++    if (!out)
++        return 0;
++
++    va_start(args, fmt);
++    written = vsnprintf(body, sizeof(body), fmt, args);
++    va_end(args);
++    if (written < 0)
++        return 0;
++    n = (size_t)written < sizeof(body) ? (size_t)written : sizeof(body) - 1;
++    if ((size_t)written >= sizeof(body))
++        n = strlen(body);
++
++    off = sizeof(WMT_PE_WARN_PREFIX) - 1;
++    memcpy(line, WMT_PE_WARN_PREFIX, off);
++    memcpy(line + off, body, n);
++    off += n;
++    if ((size_t)written >= sizeof(body)) {
++        memcpy(line + off, " [truncated]", 13);
++        off += 13;
++    }
++    line[off++] = '\n';
++    line[off] = '\0';
++
++    out(line);
++    return 1;
++}
++
++/* Same call shape as dxmt's WARN: a printf format, assembled here and passed
++ * on, so the existing call sites read the same and mean the same. */
++#define WARN(...) wmt_pe_warn(__VA_ARGS__)
  
  /* ml761: top-level API census.
   *
-@@ -39,12 +51,40 @@ extern void wmt_api_census_note(unsigned code);
+@@ -39,12 +146,46 @@ extern void wmt_api_census_note(unsigned code);
    {                                                                                                                    \
      wmt_api_census_note(code);                                                                                         \
      NTSTATUS status = WINE_UNIX_CALL(code, params);                                                                    \
@@ -575,13 +670,19 @@ index c473702..443c393 100644
 + * mapped -- before any game code calls in. */
 +__attribute__((constructor)) static void
 +wmt_pe_log_selftest(void) {
-+  WARN("[wmt-selftest] PE log route OK (winemetal thunks loaded, WARN reaching the log)");
++  /* Says whether the route resolved, instead of asserting it. If this line
++   * reads "route=OK" then PE diagnostics reach the log; if it reads anything
++   * else, nothing after it in the log from this module means anything, and a
++   * missing [tex-bad-pe] would be evidence of nothing rather than of the
++   * texture being fine. */
++  WARN("[wmt-selftest] PE log route=%s (winemetal thunks loaded)",
++       wmt_pe_log_route_ok() ? "OK" : "UNRESOLVED");
 +}
 +
  WINEMETAL_API void
  NSObject_retain(obj_handle_t obj) {
    UNIX_CALL(0, &obj);
-@@ -112,10 +152,27 @@ MTLDevice_name(obj_handle_t device) {
+@@ -112,10 +253,27 @@ MTLDevice_name(obj_handle_t device) {
  WINEMETAL_API uint32_t
  NSString_getCString(obj_handle_t str, char *buffer, uint64_t maxLength, enum WMTStringEncoding encoding) {
    struct unixcall_nsstring_getcstring params;
@@ -609,7 +710,7 @@ index c473702..443c393 100644
    UNIX_CALL(8, &params);
    return params.ret;
  }
-@@ -230,6 +287,24 @@ MTLDevice_newDepthStencilState(obj_handle_t device, const struct WMTDepthStencil
+@@ -230,6 +388,24 @@ MTLDevice_newDepthStencilState(obj_handle_t device, const struct WMTDepthStencil
  WINEMETAL_API obj_handle_t
  MTLDevice_newTexture(obj_handle_t device, struct WMTTextureInfo *info) {
    struct unixcall_mtldevice_newtexture params;
@@ -634,7 +735,7 @@ index c473702..443c393 100644
    params.device = device;
    WMT_MEMPTR_SET(params.info, info);
    UNIX_CALL(21, &params);
-@@ -730,6 +805,16 @@ MetalLayer_setProps(obj_handle_t layer, const struct WMTLayerProps *props) {
+@@ -730,6 +906,16 @@ MetalLayer_setProps(obj_handle_t layer, const struct WMTLayerProps *props) {
  WINEMETAL_API void
  MetalLayer_getProps(obj_handle_t layer, struct WMTLayerProps *props) {
    struct unixcall_generic_obj_ptr_noret params;
@@ -651,7 +752,7 @@ index c473702..443c393 100644
    params.handle = layer;
    WMT_MEMPTR_SET(params.arg, props);
    UNIX_CALL(71, &params);
-@@ -791,6 +876,16 @@ MTLCommandBuffer_logs(obj_handle_t cmdbuf) {
+@@ -791,6 +977,16 @@ MTLCommandBuffer_logs(obj_handle_t cmdbuf) {
  WINEMETAL_API uint64_t
  MTLLogContainer_enumerate(obj_handle_t logs, uint64_t start, uint64_t buffer_size, obj_handle_t *buffer) {
    struct unixcall_enumerate params;
@@ -668,7 +769,7 @@ index c473702..443c393 100644
    params.enumeratable = logs;
    params.start = start;
    params.buffer_size = buffer_size;
-@@ -838,6 +933,14 @@ WMTGetSecondaryDisplayId() {
+@@ -838,6 +1034,14 @@ WMTGetSecondaryDisplayId() {
  WINEMETAL_API void
  WMTGetDisplayDescription(uint32_t display_id, struct WMTDisplayDescription *desc) {
    struct unixcall_generic_obj_ptr_noret params;
@@ -683,7 +784,7 @@ index c473702..443c393 100644
    params.handle = display_id;
    WMT_MEMPTR_SET(params.arg, desc);
    UNIX_CALL(96, &params);
-@@ -845,7 +948,20 @@ WMTGetDisplayDescription(uint32_t display_id, struct WMTDisplayDescription *desc
+@@ -845,7 +1049,20 @@ WMTGetDisplayDescription(uint32_t display_id, struct WMTDisplayDescription *desc
  
  WINEMETAL_API void
  MetalLayer_getEDRValue(obj_handle_t layer, struct WMTEDRValue *value) {
