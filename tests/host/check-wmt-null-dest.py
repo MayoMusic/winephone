@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
 """The five winemetal entries that write through a caller-supplied pointer.
 
+Runs in scripts/apply-submodule-patches.sh, immediately after the dxmt patches
+are applied, so what it reads is the PATCHED source and not whatever the
+submodule happened to contain. That is the point: it is the check that a patch
+applied is the change the patch was for.
+
+It therefore has no "submodule missing" mode. It was briefly wired into the
+host-checks job, which checks out no submodules, and failed there with a
+FileNotFoundError -- which is the correct outcome for a check that has nothing
+to check, and the reason it belongs next to the patch stage instead.
+
 NSString_getCString, MetalLayer_getProps, MTLLogContainer_enumerate,
 WMTGetDisplayDescription and MetalLayer_getEDRValue are the only entries in
 the PE->unix table whose DESTINATION is a pointer the caller passed. A NULL
@@ -80,6 +90,19 @@ def body_of(text, signature_regex):
                 return text[m.start():j + 1]
     return None
 
+
+thunks_path_ok = os.path.exists(THUNKS)
+unix_path_ok = os.path.exists(UNIX)
+if not (thunks_path_ok and unix_path_ok):
+    # Say which tree is missing instead of dying inside open() with a
+    # FileNotFoundError that reads like a bug in this script.
+    missing = THUNKS if not thunks_path_ok else UNIX
+    print("FAIL the dxmt submodule is not checked out, so the patched source")
+    print("     cannot be examined at all: %s" % missing)
+    print("     This check verifies the result of scripts/apply-submodule-patches.sh")
+    print("     and belongs in the build, which initialises dxmt.")
+    print("FAILED: dxmt source absent")
+    sys.exit(1)
 
 thunks = open(THUNKS, encoding="utf-8", errors="replace").read()
 unix = open(UNIX, encoding="utf-8", errors="replace").read()

@@ -141,6 +141,13 @@ run_stage win32u-unix bash "$ROOT/build/win32u-unix/build.sh"
 run_stage wine-pe-ntdll bash "$ROOT/build/wine-pe/build-ntdll.sh"
 run_stage wine-pe-dxmt-prereqs bash "$ROOT/build/wine-pe/build-dxmt-prereqs.sh"
 run_stage wine-pe-modules bash "$ROOT/build/wine-pe/build-modules.sh"
+# Before anything configures or compiles dxmt. The submodule is pinned and its
+# sources cannot be committed here, so patches/ carries our changes to it --
+# and until this stage existed nothing applied them, which is why
+# patches/dxmt-winemetal-static-implibs.patch had never been applied at all.
+# Fails the build if a patch cannot be applied or if the patched source does not
+# contain what the patch was for.
+run_stage submodule-patches bash "$ROOT/scripts/apply-submodule-patches.sh"
 run_stage dxmt-ios bash "$ROOT/build/dxmt-ios/build.sh"
 
 export PATH="$ROOT/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin:$PATH"
