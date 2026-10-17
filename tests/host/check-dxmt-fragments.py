@@ -111,9 +111,30 @@ else:
         if not have_libc:
             print("note: this host's clang has no libc headers; stdio/string are "
                   "declared by hand so the declarations under test still compile")
+        # mach/mach_time.h needs the SDK on macOS. Probe for it the same way
+        # stdio is probed: if the header is not usable here, declare
+        # mach_absolute_time and carry on, because what is under test is the
+        # declarations this patch adds and not the SDK.
+        with tempfile.TemporaryDirectory() as td:
+            mprobe = os.path.join(td, "m.c")
+            open(mprobe, "w", encoding="utf-8").write(
+                "#include <mach/mach_time.h>\nuint64_t f(void){return mach_absolute_time();}\n")
+            margs = [cc, "-fsyntax-only"]
+            if shutil.which("xcrun"):
+                sdk0 = subprocess.run(["xcrun", "--sdk", "macosx", "--show-sdk-path"],
+                                      capture_output=True, text=True)
+                if sdk0.returncode == 0 and sdk0.stdout.strip():
+                    margs += ["-isysroot", sdk0.stdout.strip()]
+            have_mach = subprocess.run(margs + [mprobe],
+                                       capture_output=True, text=True).returncode == 0
+        if not have_mach:
+            print("note: mach/mach_time.h is not usable on this host, so "
+                  "mach_absolute_time is declared by hand")
+
         driver = (
             ('#include <stdint.h>\n#include <stddef.h>\n'
-             '#include <stdio.h>\n#include <string.h>\n#include <mach/mach_time.h>\n'
+             '#include <stdio.h>\n#include <string.h>\n'
+             + ('#include <mach/mach_time.h>\n' if have_mach else '')
              if have_libc else
              '#include <stdint.h>\n#include <stddef.h>\n'
              'typedef struct { int dummy; } FILE;\n'
@@ -123,8 +144,8 @@ else:
              'int fprintf(FILE *, const char *, ...);\n'
              'int snprintf(char *, size_t, const char *, ...);\n'
              'void *memset(void *, int, size_t);\n'
-             'uint64_t mach_absolute_time(void);\n'
-             '#define stderr ((FILE *)0)\n')
+             + ('' if have_mach else 'uint64_t mach_absolute_time(void);\n')
+             + '#define stderr ((FILE *)0)\n')
             + 'typedef unsigned long obj_handle_t;\n'
             'struct WMTMemoryPointer { void *ptr; };\n'
             'struct wmtcmd_base { uint32_t type; struct WMTMemoryPointer next; };\n'
@@ -149,8 +170,15 @@ else:
         with tempfile.TemporaryDirectory() as td:
             src = os.path.join(td, "frag.c")
             open(src, "w", encoding="utf-8").write(driver)
-            r = subprocess.run([cc, "-fsyntax-only", "-x", "c++", "-std=gnu++11", src],
-                               capture_output=True, text=True)
+            args = [cc, "-fsyntax-only", "-x", "c++", "-std=gnu++11"]
+            # On macOS the SDK has to be named or mach/ is not found at all.
+            # xcrun does not exist elsewhere, so its absence is not a failure.
+            if shutil.which("xcrun"):
+                sdk = subprocess.run(["xcrun", "--sdk", "macosx", "--show-sdk-path"],
+                                     capture_output=True, text=True)
+                if sdk.returncode == 0 and sdk.stdout.strip():
+                    args += ["-isysroot", sdk.stdout.strip()]
+            r = subprocess.run(args + [src], capture_output=True, text=True)
             check("the added declarations are well-formed C++ (-fsyntax-only)",
                   r.returncode == 0, (r.stderr or "").strip()[:300])
 
