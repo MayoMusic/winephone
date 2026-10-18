@@ -57,6 +57,39 @@ then the game's own `int3`. Three runs, three different swap/VRAM settings:
 The **requested size is identical in all three**; the free total moves by about
 7 MB. A pool with 953 MB free does not fail an 0.8 MB request.
 
+### The configuration of record
+
+Where each device setting lives, and the run it is proven from. The 14:11 log --
+the one that echoed `madeira.cfg:` and the `[wmt]` lines -- is not on disk any
+more, so what is not listed here was never proven for that build; the probe run
+starts from the values below.
+
+Game details for `ROTTR.exe` (device-side, not in madeira.cfg):
+
+| setting | value | proven from |
+|---|---|---|
+| Compatibility & performance > CPU cores reported | 2 | 2026-10-17 15:38: `[madeira] ml1122 cpu-count override: reporting 2 processors (host 6)` |
+| > Report an NVIDIA GPU | on | `[bcd] ... nvidia=1`; this is where `dxgi.customDeviceId=2544` comes from |
+| > Wine's C++ runtime | on | `[bcd] ... wine-vcrt=1` (2026-10-17 15:38; it was `0` in the 15:33 run) |
+| > AVX and AVX2 | off | `[bcd] ... avx=0` |
+| Advanced > This game's config | `env.MADEIRA_EC_HOOK_TRACE=0` | `[game-cfg] env.MADEIRA_EC_HOOK_TRACE=0` |
+| Aspect & scaling | stretch (fit in the 15:33 run) | `[display-shape] resolution=1408x648 mode=stretch` |
+
+`Documents/madeira.cfg` -- the `madeira.cfg:` line echoes the whole file, so a
+key absent from this list was not set:
+
+- The 01:15/06:32/07:53 runs of the table above: `MADEIRA_CPU_COUNT=2`,
+  `pool = 512`, and the per-run swap and `vram-mb` values (from those runs'
+  logs, since deleted).
+- 2026-10-17 15:33-15:38: only `env.MADEIRA_JIT_SHORTCUT=1`. No `pool`,
+  `swap-mb` or `vram-mb` key: pool default 896 MB (`Allocating 896MB JIT
+  pool`), swap off (no `[swap] ml1077 ... tier ON` line), the video budget
+  automatic (`[wmt] ml1042 video memory budget = 1024 MB`).
+- 2026-10-18: `map-trace = 1`; ml1221 adds `env.MADEIRA_ROTRR_HEAP_PROBE = 1`.
+
+The patched `ROTTR.exe` is part of the configuration too: the 14:11 run is the
+768 MB one (`[guest-reserve] #1 0x713d900000+0x30000000 ... running_total=768MB`).
+
 ## What the host did: nothing wrong
 
 `f8c3f8d` added the instrumentation that makes this a measurement rather than a
