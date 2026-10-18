@@ -143,8 +143,8 @@ always = term.index('[term] #%lu handle=%p exit=%08x self=%d')
 budget = term.index('if (term_log_count < 16')
 check('NtTerminateProcess has an unbudgeted line per call', always >= 0)
 check('the per-call line comes before the budgeted dump', always < budget)
-check('the per-call line names the caller\'s guest RIP',
-      'guest_rip=0x%llx' in term)
+check('the per-call line names the caller as module+RVA, which is what was asked',
+      'caller=%s' in term and 'ios_guest_caller_string( term_rip, caller, sizeof(caller) );' in term)
 check('the last refusal is in the per-call line',
       'last-refused: %s' in term and 'ios_lastfail_summary( lastfail, sizeof(lastfail) );' in term)
 check('the full dump prints the refusal ring',
@@ -158,6 +158,11 @@ check('the ring is defined once, non-static, so the terminate path can link it',
       and '\nvoid ios_lastfail_dump( const char *why )' in src)
 check('the ring is a ring: the newest refusal survives a retry chain',
       '#define IOS_LASTFAIL_MAX 4' in src and 'ios_lastfail_seq % IOS_LASTFAIL_MAX' in src)
+check('one caller formatter, non-static, shared by [term] and [alloc-last]',
+      '\nvoid ios_guest_caller_string( unsigned long long rip, char *buf, size_t len )' in src
+      and 'ios_guest_caller_string( out[i].rip, caller, sizeof(caller) );' in body(src, 'ios_lastfail_dump'))
+check('an unattributed caller prints its raw address, not a name+0',
+      'not in any registered image' in body(src, 'ios_guest_caller_string'))
 check('the summary reports size and status, which is what was asked for',
       'size=0x%llx status=%08x type=0x%x tid=%04x seq=%llu' in src)
 check('nothing is refused without being recorded -- even outside the print budget',

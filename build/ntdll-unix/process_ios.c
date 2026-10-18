@@ -3253,27 +3253,32 @@ NTSTATUS WINAPI NtTerminateProcess( HANDLE handle, LONG exit_code )
      * NtTerminateProcess the exit code, the caller's guest RIP and the last
      * refused allocation are all in it.
      *
-     * Cheap by construction: two scalars from the FEX state, no stack read, no
-     * image name resolution, one dprintf. The heavy dump below keeps its own
-     * (now larger) budget -- this line must never be the reason a run is
-     * slowed down or a log is flooded. */
+     * Cheap by construction: two scalars from the FEX state, no stack read, one
+     * image-header walk to name the caller, one dprintf. The heavy dump below
+     * keeps its own (now larger) budget -- this line must never be the reason a
+     * run is slowed down or a log is flooded. */
     {
         static unsigned long term_all;
         extern void ios_lastfail_summary( char *buf, size_t len );
+        extern void ios_guest_caller_string( unsigned long long rip, char *buf, size_t len );
         TEB *term_teb = NtCurrentTeb();
         CHPE_V2_CPU_AREA_INFO *term_area = term_teb ? term_teb->ChpeV2CpuAreaInfo : NULL;
         void *term_state = term_area ? *(void **)((char *)term_area + 0x30) : NULL;
         unsigned long long term_rip = term_state ? *(const uint64_t *)((const char *)term_state + 0x18) : 0;
-        char lastfail[288];
+        char caller[192], lastfail[288];
 
         term_all++;
+        /* The caller as module+0xRVA: a raw RIP cannot be read without the run's
+         * load table, and a terminate line is read long after the run it
+         * belongs to. */
+        ios_guest_caller_string( term_rip, caller, sizeof(caller) );
         ios_lastfail_summary( lastfail, sizeof(lastfail) );
-        dprintf( 2, "[term] #%lu handle=%p exit=%08x self=%d pid=%04x tid=%04x guest_rip=0x%llx"
+        dprintf( 2, "[term] #%lu handle=%p exit=%08x self=%d pid=%04x tid=%04x caller=%s"
                     " | last-refused: %s\n",
                  term_all, handle, (unsigned)exit_code, handle == NtCurrentProcess(),
                  term_teb ? (unsigned)(ULONG_PTR)term_teb->ClientId.UniqueProcess : 0,
                  term_teb ? (unsigned)(ULONG_PTR)term_teb->ClientId.UniqueThread : 0,
-                 term_rip, lastfail );
+                 caller, lastfail );
     }
     {
         static int term_log_count = 0;

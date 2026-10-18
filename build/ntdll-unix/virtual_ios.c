@@ -6056,24 +6056,42 @@ void ios_lastfail_note( const char *tag, unsigned long long size, unsigned statu
     ios_lastfail[slot].seq = ios_lastfail_seq;
 }
 
-/* Name a guest VA as image+offset. The same MZ/export-directory walk
- * ios_alloc_caller_dump does inline; kept separate so the terminate path can
- * name a module without touching the guest stack. */
-static const char *ios_lastfail_image( unsigned long long va, unsigned long long *off )
+/* Name a guest VA as image+offset. NULL when the VA is not inside any
+ * registered image -- then no offset means anything, and the caller prints the
+ * raw address instead of a lie. The same MZ/export-directory walk
+ * ios_alloc_caller_dump does inline; kept separate (and non-static) so the
+ * terminate path can name a module -- and its RVA -- without touching the
+ * guest stack. */
+const char *ios_guest_image_name( unsigned long long va, unsigned long long *off )
 {
     unsigned long long base = ios_jit_module_base_for_va( va, NULL );
     const unsigned char *mb;
     unsigned int e_lf, exp_rva, name_rva;
 
     if (off) *off = base ? va - base : 0;
-    if (!base) return "(unattributed)";
+    if (!base) return NULL;
     mb = (const unsigned char *)(uintptr_t)base;
-    if (!(mb[0] == 'M' && mb[1] == 'Z')) return "(not-PE)";
+    if (!(mb[0] == 'M' && mb[1] == 'Z')) return "(image)";
     if ((e_lf = *(const unsigned int *)(mb + 0x3c)) < 0x1000 &&
         (exp_rva = *(const unsigned int *)(mb + e_lf + 0x88)) &&
         (name_rva = *(const unsigned int *)(mb + exp_rva + 0x0c)))
         return (const char *)(mb + name_rva);
     return "(exe)";
+}
+
+/* "module+0xRVA", or the raw address when no image owns it, or "(no guest
+ * context)" when the thread has no FEX state. One formatter for the [term]
+ * line and the [alloc-last] ring, so the two read alike. */
+void ios_guest_caller_string( unsigned long long rip, char *buf, size_t len )
+{
+    unsigned long long off = 0;
+    const char *name;
+
+    if (!rip) { snprintf( buf, len, "(no guest context)" ); return; }
+    if ((name = ios_guest_image_name( rip, &off )))
+        snprintf( buf, len, "%s+0x%llx", name, off );
+    else
+        snprintf( buf, len, "0x%llx (not in any registered image)", rip );
 }
 
 /* One line, for the per-termination record: the newest refusal, or "none".
@@ -6122,12 +6140,12 @@ void ios_lastfail_dump( const char *why )
     dprintf( 2, "[alloc-last] %s: %u most recent refusals, oldest first\n", why, n );
     for (i = 0; i < n; i++)
     {
-        unsigned long long off = 0;
-        const char *name = ios_lastfail_image( out[i].rip, &off );
+        char caller[192];
 
-        dprintf( 2, "[alloc-last]   #%llu %s size=0x%llx status=%08x type=0x%x tid=%04x caller=%s+0x%llx\n",
+        ios_guest_caller_string( out[i].rip, caller, sizeof(caller) );
+        dprintf( 2, "[alloc-last]   #%llu %s size=0x%llx status=%08x type=0x%x tid=%04x caller=%s\n",
                  out[i].seq, out[i].tag, out[i].size, out[i].status, out[i].type,
-                 out[i].tid, out[i].rip ? name : "(no guest context)", off );
+                 out[i].tid, caller );
     }
 }
 
