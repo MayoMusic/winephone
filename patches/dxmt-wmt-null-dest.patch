@@ -85,7 +85,7 @@ index db4ebbb..8d868cc 100644
    if (ret)
      return ret;
 diff --git a/src/winemetal/unix/winemetal_unix.c b/src/winemetal/unix/winemetal_unix.c
-index 3f7974e..01b0bfd 100644
+index 3f7974e..cc41836 100644
 --- a/src/winemetal/unix/winemetal_unix.c
 +++ b/src/winemetal/unix/winemetal_unix.c
 @@ -18,6 +18,57 @@ static inline CGDirectDisplayID CGMainDisplayID(void) { return 1; }
@@ -518,6 +518,37 @@ index 3f7974e..01b0bfd 100644
    value->maximum_edr_color_component_value = 1.0;
    value->maximum_potential_edr_color_component_value = 1.0;
  
+@@ -5491,7 +5840,29 @@ _MTLBuffer_updateContents(void *obj) {
+     }
+     return STATUS_SUCCESS;
+   }
+-  memcpy((void *)((char *)[(id<MTLBuffer>)params->buffer contents] + params->offset), params->data.ptr, params->length);
++  /* The destination comes from [MTLBuffer contents], which returns NULL for a
++   * buffer with no storage (zero-length or released). Passing NULL to memcpy
++   * is a SEGV at _platform_memmove, which is exactly what this run hit:
++   * dst=NULL, src=0x71670676a0, size=0x49ef4, lr=_MTLBuffer_updateContents.
++   * The guest pointer was also refused by lowalloc (guest 0, 32-byte span),
++   * so both ends can be missing; log which handle produced the NULL rather
++   * than crashing, because a crash here kills the process and loses every
++   * other diagnostic the run could have produced. */
++  id<MTLBuffer> wmt_buf = (id<MTLBuffer>)params->buffer;
++  void *wmt_dst = (void *)((char *)[wmt_buf contents] + params->offset);
++  if (!wmt_dst || ![wmt_buf contents]) {
++    static unsigned long wmt_null_dst;
++    if (++wmt_null_dst <= 8 || (wmt_null_dst % 1024) == 0)
++      fprintf(stderr, "[wmt-remote] updateContents NULL dst on buffer 0x%llx "
++                      "(contents=%p, offset=%llu, length=%llu, src=%p) (%lu so far)\n",
++              (unsigned long long)params->buffer,
++              (void *)[wmt_buf contents],
++              (unsigned long long)params->offset,
++              (unsigned long long)params->length,
++              params->data.ptr, wmt_null_dst);
++    return STATUS_SUCCESS;
++  }
++  memcpy(wmt_dst, params->data.ptr, params->length);
+ #if !TARGET_OS_IOS
+   /* Managed storage mode doesn't exist on iOS (unified memory). */
+   if ([(id<MTLBuffer>)params->buffer storageMode] == MTLStorageModeManaged)
 diff --git a/src/winemetal/winemetal_thunks.c b/src/winemetal/winemetal_thunks.c
 index c473702..944d168 100644
 --- a/src/winemetal/winemetal_thunks.c
