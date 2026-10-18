@@ -550,7 +550,7 @@ index 3f7974e..cc41836 100644
    /* Managed storage mode doesn't exist on iOS (unified memory). */
    if ([(id<MTLBuffer>)params->buffer storageMode] == MTLStorageModeManaged)
 diff --git a/src/winemetal/winemetal_thunks.c b/src/winemetal/winemetal_thunks.c
-index c473702..944d168 100644
+index c473702..472dd54 100644
 --- a/src/winemetal/winemetal_thunks.c
 +++ b/src/winemetal/winemetal_thunks.c
 @@ -6,8 +6,131 @@
@@ -763,7 +763,7 @@ index c473702..944d168 100644
    UNIX_CALL(8, &params);
    return params.ret;
  }
-@@ -230,6 +404,24 @@ MTLDevice_newDepthStencilState(obj_handle_t device, const struct WMTDepthStencil
+@@ -230,6 +404,73 @@ MTLDevice_newDepthStencilState(obj_handle_t device, const struct WMTDepthStencil
  WINEMETAL_API obj_handle_t
  MTLDevice_newTexture(obj_handle_t device, struct WMTTextureInfo *info) {
    struct unixcall_mtldevice_newtexture params;
@@ -773,22 +773,71 @@ index c473702..944d168 100644
 +   * validation. Printing here as well as there is what separates a marshalling
 +   * bug -- sane here, wrong there -- from a value that is already wrong when DXMT
 +   * receives it. Only the oversized case is logged; a normal texture says
-+   * nothing, and this is the one place a game's resource churn would be noisy. */
-+  if (info && (info->width > 32768u || info->height > 32768u)) {
-+    static unsigned n_logged;
-+    if (n_logged++ < 8) {
-+      WARN("[tex-bad-pe] %ux%u mip=%u array=%u fmt=%u",                            \
-+           (unsigned)info->width, (unsigned)info->height,                         \
-+           (unsigned)info->mipmap_level_count,                                     \
-+           (unsigned)info->array_length,                                          \
-+           (unsigned)info->pixel_format);
++   * nothing, and this is the one place a game's resource churn would be noisy.
++   *
++   * ml1218 adds three things the 2026-10-18 report asked for.
++   *
++   * [tex-desc], first four calls: proof that THIS thunk is on the failing path at
++   * all. The host counted four newTexture calls while [tex-bad-pe] never appeared
++   * once, which is ambiguous between "the swapchain builds its backbuffer
++   * somewhere else" and "this diagnostic's output is lost". A caller count
++   * settles that before another guess is built on it.
++   *
++   * Bit 31 is masked off. It is not part of a dimension and no legitimate one
++   * has it: Metal caps textures at 16384 and this hardware at 32768.
++   * 0x80000300 is 768 with bit 31 set, so masking hands the game the texture it
++   * asked for instead of a rejection, and the masked value is written back so
++   * the caller's own record agrees with what was created.
++   *
++   * If the value is STILL out of range it is refused HERE, with a log and a 0
++   * return: no unix call, so no 0xc000000d, so no assert() and no dialog. The
++   * assert this replaces killed the process and took every other diagnostic of
++   * the run down with it. A null handle is survivable, and a null handle plus a
++   * line naming the descriptor is diagnosable. */
++  if (info) {
++    static unsigned n_calls, n_bad, n_desc;
++    unsigned n = ++n_calls;
++    unsigned w = (unsigned)info->width, h = (unsigned)info->height;
++    const int bad = (w > 32768u || h > 32768u);
++
++    if ((n <= 4 || bad) && n_desc < 12) {
++      n_desc++;
++      WARN("[tex-desc] #%u call=%u %ux%u mip=%u array=%u depth=%u fmt=%u usage=%u "
++           "type=%u opts=%#x samples=%u",
++           n_desc, n, w, h, (unsigned)info->mipmap_level_count,
++           (unsigned)info->array_length, (unsigned)info->depth,
++           (unsigned)info->pixel_format, (unsigned)info->usage,
++           (unsigned)info->type, (unsigned)info->options,
++           (unsigned)info->sample_count);
++    }
++    if (bad) {
++      static unsigned n_logged;
++      unsigned mw = w & 0x7fffffffu, mh = h & 0x7fffffffu;
++      if (n_logged++ < 8) {
++        WARN("[tex-bad-pe] %ux%u mip=%u array=%u fmt=%u",                            \
++             (unsigned)info->width, (unsigned)info->height,                         \
++             (unsigned)info->mipmap_level_count,                                     \
++             (unsigned)info->array_length,                                          \
++             (unsigned)info->pixel_format);
++      }
++      if (++n_bad <= 8)
++        WARN("[tex-mask] #%u %ux%u -> %ux%u (bit 31 is not a size)",
++             n_bad, w, h, mw, mh);
++      if (mw > 32768u || mh > 32768u) {
++        if (n_bad <= 8)
++          WARN("[tex-softfail] #%u %ux%u is still past the 32768 cap after masking; "
++               "returning 0 instead of asserting", n_bad, w, h);
++        return 0;
++      }
++      info->width = mw;
++      info->height = mh;
 +    }
 +  }
 +
    params.device = device;
    WMT_MEMPTR_SET(params.info, info);
    UNIX_CALL(21, &params);
-@@ -730,6 +922,16 @@ MetalLayer_setProps(obj_handle_t layer, const struct WMTLayerProps *props) {
+@@ -730,6 +971,16 @@ MetalLayer_setProps(obj_handle_t layer, const struct WMTLayerProps *props) {
  WINEMETAL_API void
  MetalLayer_getProps(obj_handle_t layer, struct WMTLayerProps *props) {
    struct unixcall_generic_obj_ptr_noret params;
@@ -805,7 +854,7 @@ index c473702..944d168 100644
    params.handle = layer;
    WMT_MEMPTR_SET(params.arg, props);
    UNIX_CALL(71, &params);
-@@ -791,6 +993,16 @@ MTLCommandBuffer_logs(obj_handle_t cmdbuf) {
+@@ -791,6 +1042,16 @@ MTLCommandBuffer_logs(obj_handle_t cmdbuf) {
  WINEMETAL_API uint64_t
  MTLLogContainer_enumerate(obj_handle_t logs, uint64_t start, uint64_t buffer_size, obj_handle_t *buffer) {
    struct unixcall_enumerate params;
@@ -822,7 +871,7 @@ index c473702..944d168 100644
    params.enumeratable = logs;
    params.start = start;
    params.buffer_size = buffer_size;
-@@ -838,6 +1050,14 @@ WMTGetSecondaryDisplayId() {
+@@ -838,6 +1099,14 @@ WMTGetSecondaryDisplayId() {
  WINEMETAL_API void
  WMTGetDisplayDescription(uint32_t display_id, struct WMTDisplayDescription *desc) {
    struct unixcall_generic_obj_ptr_noret params;
@@ -837,7 +886,7 @@ index c473702..944d168 100644
    params.handle = display_id;
    WMT_MEMPTR_SET(params.arg, desc);
    UNIX_CALL(96, &params);
-@@ -845,7 +1065,20 @@ WMTGetDisplayDescription(uint32_t display_id, struct WMTDisplayDescription *desc
+@@ -845,7 +1114,20 @@ WMTGetDisplayDescription(uint32_t display_id, struct WMTDisplayDescription *desc
  
  WINEMETAL_API void
  MetalLayer_getEDRValue(obj_handle_t layer, struct WMTEDRValue *value) {

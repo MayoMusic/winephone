@@ -217,6 +217,33 @@ APP="$ROOT/build/DerivedData/Build/Products/Debug-iphoneos/Madeira.app"
 rm -rf "$OUT/Payload"
 mkdir -p "$OUT/Payload"
 ditto "$APP" "$OUT/Payload/Madeira.app"
+
+# ---------------------------------------------------------------- build stamp
+# v0.1.3 (4) comes from MARKETING_VERSION and CURRENT_PROJECT_VERSION in the
+# Xcode project, so it is IDENTICAL for every commit: a log line naming it cannot
+# tell two runs apart. That is why the 2026-10-18 report could not say whether the
+# IPA on the device contained commit 237bca0 -- and why "the build string never
+# changed" was read as evidence when it was only a constant.
+#
+# BuildStamp.text (app/Madeira/Library.swift) already prefers a `MadeiraBuild`
+# key over the bundle version, and the [build] line logged at every start prints
+# it verbatim. Write the commit into the PACKAGED bundle's Info.plist here:
+# not as an Xcode build setting, because an unset $(MADEIRA_BUILD) would survive
+# into a local build as a literal, and not in app/Madeira/Info.plist, because the
+# version contract and `git describe`-free reproducibility of the source tree are
+# both worth more than a stamp in a developer's own build.
+#
+# No spaces in the value: PlistBuddy's `Add :key string <value>` splits on
+# whitespace unless the value is quoted, and a silently truncated stamp is worse
+# than a compact one.
+BUILD_COMMIT="${GITHUB_SHA:-$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)}"
+BUILD_STAMP="$(date -u +%Y%m%dT%H%MZ)-${BUILD_COMMIT:0:12}"
+PLIST="$OUT/Payload/Madeira.app/Info.plist"
+/usr/libexec/PlistBuddy -c "Delete :MadeiraBuild" "$PLIST" >/dev/null 2>&1 || true
+/usr/libexec/PlistBuddy -c "Add :MadeiraBuild string $BUILD_STAMP" "$PLIST" \
+  || { echo "error: could not write MadeiraBuild=$BUILD_STAMP into $PLIST" >&2; exit 5; }
+echo "build stamp: $BUILD_STAMP"
+
 IPA="$OUT/WinePhone-unsigned.ipa"
 run_stage ipa-package bash -c 'cd "$1" && /usr/bin/zip -qry "$2" Payload' _ "$OUT" "$IPA"
 

@@ -5819,6 +5819,122 @@ unsigned long long ios_jit_module_base_for_va(unsigned long long va, unsigned lo
     return 0;
 }
 
+/* Name the guest caller of a refused allocation as module+offset.
+ *
+ * Why this exists (request from the 2026-10-18 11:39 report): ROTTR's own
+ * allocator printed "Out of memory, UNKNOWN requested 1758268 bytes (1166270896
+ * total free)" and the log for that whole run contained ZERO [alloc-fail] and
+ * ZERO [alloc-fail-ex] lines. A silent failure with no caller is the one shape
+ * that cannot be diagnosed: "the guest never asked", "the guest asked and was
+ * refused several layers below the logger", and "the guest asked, was served,
+ * and threw the result away" all look identical.
+ *
+ * [alloc-fail] has no caller because a unix-side frame cannot name guest code.
+ * The guest CAN: its registers live in the FEX CPU area, so the interrupted
+ * RIP and the guest stack are both readable from here, and
+ * ios_jit_module_base_for_va() already maps a guest VA to its image base and
+ * the image's export directory already carries its name.
+ *
+ * Deliberately NOT a return-address validator. process_ios.c's [term-stack]
+ * checks for a CALL in front of every candidate because it prints a chain for
+ * a human to read. This one runs on the allocation path, where the cost must
+ * stay near zero and the only question is "which module asked"; candidates are
+ * labelled as candidates. */
+static void ios_alloc_caller_dump( const char *tag, unsigned long *calls )
+{
+    TEB *teb = NtCurrentTeb();
+    CHPE_V2_CPU_AREA_INFO *area;
+    ULONG64 rip = 0, rsp = 0;
+    unsigned printed = 0;
+
+    /* Uncapped for the first 16 failures, then every 64th: the first failure is
+     * the interesting one and a storm must not bury it, but a storm must not
+     * become a stack walk either. The counter belongs to the CALL SITE, not to
+     * this function: a burst of [map-fail] parameter rejections must not spend
+     * the budget [alloc-fail] needs later in the same run. */
+    if (++*calls > 16 && (*calls % 64)) return;
+
+    if (!teb) { dprintf( 2, "[%s] no TEB, no caller\n", tag ); return; }
+    area = teb->ChpeV2CpuAreaInfo;
+    if (!area || !area->ContextAmd64)
+    {
+        dprintf( 2, "[%s] no FEX context (cpuarea=%p): the caller is a native "
+                    "unix thread, not guest code\n", tag, (void *)area );
+        return;
+    }
+    rip = *(ULONG64 *)((char *)area->ContextAmd64 + 0xF8);
+    rsp = *(ULONG64 *)((char *)area->ContextAmd64 + 0x98);
+
+    {
+        unsigned long long base = ios_jit_module_base_for_va( rip, NULL );
+        const unsigned char *mb = (const unsigned char *)(uintptr_t)base;
+        const char *mname = "?";
+        unsigned int e_lf, exp_rva, name_rva;
+        if (!base)
+            dprintf( 2, "[%s] guest rip=0x%llx is not in a registered image "
+                        "(it is the ntdll stub or FEX-internal)\n",
+                     tag, (unsigned long long)rip );
+        else
+        {
+            if (mb[0] == 'M' && mb[1] == 'Z' &&
+                (e_lf = *(const unsigned int *)(mb + 0x3c)) < 0x1000 &&
+                (exp_rva = *(const unsigned int *)(mb + e_lf + 0x88)) &&
+                (name_rva = *(const unsigned int *)(mb + exp_rva + 0x0c)))
+                mname = (const char *)(mb + name_rva);
+            else if (mb[0] == 'M' && mb[1] == 'Z')
+                mname = "(exe)";
+            dprintf( 2, "[%s] guest rip=0x%llx = %.32s+0x%llx\n", tag,
+                     (unsigned long long)rip, mname,
+                     (unsigned long long)(rip - base) );
+        }
+    }
+
+    if (!rsp || (rsp & 7) || rsp < 0x100000000ULL || rsp >= 0x800000000000ULL)
+    {
+        dprintf( 2, "[%s] guest rsp=0x%llx unusable, no stack scan\n",
+                 tag, (unsigned long long)rsp );
+        return;
+    }
+    {
+        uint64_t buf[64];
+        mach_vm_size_t got = 0;
+        int i, n;
+        /* mach_vm_read_overwrite, not a dereference: a wild rsp must not fault
+         * the thread that is in the middle of reporting a failure. */
+        if (mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)rsp,
+                                    sizeof(buf), (mach_vm_address_t)buf, &got ) != KERN_SUCCESS ||
+            got < 8)
+        {
+            dprintf( 2, "[%s] guest stack at 0x%llx unreadable, no stack scan\n",
+                     tag, (unsigned long long)rsp );
+            return;
+        }
+        n = (int)(got / 8);
+        for (i = 0; i < n && printed < 4; i++)
+        {
+            unsigned long long msz = 0, base = ios_jit_module_base_for_va( buf[i], &msz );
+            const unsigned char *mb = (const unsigned char *)(uintptr_t)base;
+            const char *mname = "?";
+            unsigned int e_lf, exp_rva, name_rva;
+            if (!base) continue;
+            if (mb[0] == 'M' && mb[1] == 'Z' &&
+                (e_lf = *(const unsigned int *)(mb + 0x3c)) < 0x1000 &&
+                (exp_rva = *(const unsigned int *)(mb + e_lf + 0x88)) && exp_rva < msz &&
+                (name_rva = *(const unsigned int *)(mb + exp_rva + 0x0c)) && name_rva < msz)
+                mname = (const char *)(mb + name_rva);
+            else if (mb[0] == 'M' && mb[1] == 'Z')
+                mname = "(exe)";
+            dprintf( 2, "[%s]   guest sp+%03x: 0x%llx = %.32s+0x%llx\n", tag, i * 8,
+                     (unsigned long long)buf[i], mname,
+                     (unsigned long long)(buf[i] - base) );
+            printed++;
+        }
+        if (!printed)
+            dprintf( 2, "[%s]   no image address in the first %d guest stack words\n",
+                     tag, n );
+    }
+}
+
 /* task #34 [x86-ptr]: is `va` a GUEST INSTRUCTION address — a pointer into the
  * executable section of an x86-64 module?
  *
@@ -19807,8 +19923,28 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
                  * the mach query is cheap but not free, and the first handful
                  * of verdicts settle the question. */
                 what[0] = 0;
-                if (ios_scan_fail_addr && described++ < 12)
-                    ios_va_describe( ios_scan_fail_addr, what, sizeof(what) );
+                /* ml1218: EEXIST is mach_vm_map's KERN_NO_SPACE (see
+                 * anon_mmap_tryfixed), i.e. "something is already mapped there" --
+                 * the one refusal whose cause is a fact about THIS process's
+                 * address space rather than about iOS's limits. It therefore gets
+                 * its own budget instead of sharing `described`: in ROTTR's
+                 * 11:25:47 run a dozen 8 MB FAILED lines carried an EMPTY
+                 * description because SLOW lines had already spent that budget,
+                 * so the one line that could have named the occupying mapping
+                 * said nothing at all. Passing `size` (not 0) makes the probe
+                 * range-aware, so "free head, occupied tail" is reported as
+                 * exactly that instead of as a free address. */
+                if (ios_scan_fail_addr)
+                {
+                    if (ios_scan_fail_errno == EEXIST)
+                    {
+                        static int described_eexist;
+                        if (described_eexist++ < 24 || !(described_eexist % 256))
+                            ios_va_describe_range( ios_scan_fail_addr, size, what, sizeof(what) );
+                    }
+                    else if (described++ < 12)
+                        ios_va_describe( ios_scan_fail_addr, what, sizeof(what) );
+                }
 
                 {
                 static unsigned long vs_storm;
@@ -19828,7 +19964,7 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
                         : ceiling_relaxable ? (++vs_relaxed <= 64 || !(vs_relaxed % 1024)) : (vs_fails++ < 256))
                 dprintf( 2, "[va-scan] %s window=%p..%p size=%p align=%p %s tries=%u skips=%u"
                             " | seen=%p..%p views=%u maxgap=%p tailgap=%p stop=%s"
-                            " | firstfail=%p errno=%d(%s) %s%s\n",
+                            " | firstfail=%p errno=%d(%s) stage=%s err=%d %s%s\n",
                          ptr ? "SLOW" : "FAILED", start, end, (void *)size,
                          (void *)(align_mask + 1), top_down ? "top-down" : "bottom-up",
                          ios_va_scan_tries - tries0, ios_va_scan_skips - skips0,
@@ -19836,7 +19972,16 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
                          (void *)ios_scan_maxgap, (void *)ios_scan_tailgap,
                          ios_scan_stop_name( ios_scan_stop ),
                          ios_scan_fail_addr, ios_scan_fail_errno,
-                         ios_scan_fail_errno ? strerror( ios_scan_fail_errno ) : "-", what,
+                         ios_scan_fail_errno ? strerror( ios_scan_fail_errno ) : "-",
+                         /* ml1218: the raw reason behind `errno`, which is a lossy
+                          * encoding -- anon_mmap_tryfixed flattens every
+                          * mach_vm_map result except KERN_NO_SPACE into ENOMEM, so
+                          * "errno=12" cannot distinguish KERN_INVALID_ADDRESS (the
+                          * address is outside this task's map) from a real
+                          * out-of-space. ios_af keeps the raw number and the stage
+                          * that saw it. */
+                         ios_af.stage <= 6 ? ios_af_stage_name[ios_af.stage] : "?",
+                         ios_af.err, what,
                          ptr ? "" : (ceiling_relaxable ? "  --> relaxing ceiling, retrying unclamped"
                                                        : "  <-- STATUS_NO_MEMORY (callers see a NULL alloc)") );
                 }
@@ -28493,8 +28638,10 @@ NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR z
         if (st != STATUS_SUCCESS)
         {
             static unsigned long af_n;
+            static unsigned long af_caller_n;
             unsigned long n = ++af_n;
             if (n <= 64 || (n % 64) == 0)
+            {
                 dprintf( 2, "[alloc-fail] ml814 #%lu status=%08x hint=%p size=0x%llx type=0x%x "
                             "protect=0x%x tid=%04x | STAGE=%s err=%d at 0x%llx+0x%llx\n",
                          n, (unsigned)st, jumbo_hint, (unsigned long long)jumbo_size,
@@ -28502,6 +28649,11 @@ NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR z
                          NtCurrentTeb() ? (unsigned)(ULONG_PTR)NtCurrentTeb()->ClientId.UniqueThread : 0,
                          ios_af.stage <= 6 ? ios_af_stage_name[ios_af.stage] : "?",
                          ios_af.err, ios_af.addr, ios_af.size );
+                /* ml1218: and WHO asked -- the request has named size/type/hint
+                 * and the kernel's raw reason since ml813, but never the caller,
+                 * so a 1.7 MB refusal could not be tied to a game subsystem. */
+                ios_alloc_caller_dump( "alloc-fail", &af_caller_n );
+            }
         }
         if (!st && ret) ios_vm_note_alloc( *ret, size_ptr ? *size_ptr : 0, type, protect,
                                            ios_req_hint, (UINT64)zero_bits, (UINT64)limit );
@@ -29940,8 +30092,10 @@ retry_code_carve_reuse:
         if (st != STATUS_SUCCESS)
         {
             static unsigned long aex_n;
+            static unsigned long aex_caller_n;
             unsigned long i2 = ++aex_n;
             if (i2 <= 64 || (i2 % 64) == 0)
+            {
                 dprintf( 2, "[alloc-fail-ex] ml1217 #%lu NtAllocateVirtualMemoryEx status=%08x "
                             "ret=%p size=0x%llx type=0x%x protect=0x%x attrs=0x%x "
                             "limit=[0x%llx,0x%llx] align=0x%llx machine=0x%x "
@@ -29955,6 +30109,13 @@ retry_code_carve_reuse:
                          (unsigned long long)(ios_swap_disk_used() >> 20),
                          (unsigned long long)(ios_swap_cap >> 20),
                          NtCurrentTeb() ? (unsigned)(ULONG_PTR)NtCurrentTeb()->ClientId.UniqueThread : 0 );
+                /* ml1218: caller attribution, same as [alloc-fail] -- FEX's
+                 * ARM64EC AllocatorHooks calls ::VirtualAlloc2, so this entry is
+                 * the one the emulator's own allocator uses, and "which module
+                 * asked" is the only thing that separates a game request from an
+                 * emulator-internal one. */
+                ios_alloc_caller_dump( "alloc-fail-ex", &aex_caller_n );
+            }
         }
         return st;
     }
@@ -32113,6 +32274,8 @@ static void ios_map_fail( const char *who, unsigned int status, HANDLE handle, H
      * from the status field, and hiding them would make an absent line
      * ambiguous between "refused" and "never asked". */
     if (i <= 32 || (i % 32) == 0)
+    {
+        static unsigned long map_caller_n;
         dprintf( 2, "[map-fail] ml1216 #%lu %s status=%08x handle=%p process=%p hint=%p "
                     "zero_bits=0x%llx size=0x%llx (%llu MB) commit=0x%llx off=0x%llx "
                     "alloc_type=0x%x protect=0x%x | footprint=%llu MB "
@@ -32126,6 +32289,9 @@ static void ios_map_fail( const char *who, unsigned int status, HANDLE handle, H
                  ios_swap_refused, (unsigned long long)(ios_swap_disk_used() >> 20),
                  (unsigned long long)(ios_swap_cap >> 20),
                  NtCurrentTeb() ? (unsigned)(ULONG_PTR)NtCurrentTeb()->ClientId.UniqueThread : 0 );
+        /* ml1218: the section this failed to map, and the module that asked. */
+        ios_alloc_caller_dump( "map-fail", &map_caller_n );
+    }
 }
 
 /* Counted at both entry points, read once a second. Relaxed atomics only:
