@@ -1283,13 +1283,34 @@ static void *ios_pool_warmer_thread( void *arg )
                             if (kr[i] == KERN_SUCCESS) vm_deallocate( mach_task_self(), a[i], 0x19000 );
                         }
                     }
-                    dprintf(2, "[footprint] rev=ml358 phys=%llu MB (peak %llu) internal=%llu MB "
-                            "compressed=%llu MB external=%llu MB reusable=%llu MB (cycle=%u)\n",
-                            fp_mb, peak_mb,
-                            (unsigned long long)vmi.internal >> 20,
-                            (unsigned long long)vmi.compressed >> 20,
-                            (unsigned long long)vmi.external >> 20,
-                            (unsigned long long)vmi.reusable >> 20, cycle);
+                    /* ml1219: HEADROOM, NOT FOOTPRINT, IS WHAT JETSAM DECIDES ON.
+                     *
+                     * This run (and the one before it) ended with the log simply
+                     * stopping: no NtTerminateProcess, no wineserver bye, no
+                     * "Wine finished" line. phys=2410MB against a 3376MB limit
+                     * looks like 966MB of headroom, but phys_footprint is not
+                     * the number the kernel kills on -- the ledger it charges
+                     * includes compressed, IOKit/GPU and the pool's shared
+                     * pages. os_proc_available_memory() IS that number, and it
+                     * was only ever printed once, at boot (ml992). Printing it
+                     * next to the footprint every cycle costs one syscall and
+                     * turns "was it jetsam?" into a trend a log can answer. */
+                    {
+                        extern size_t os_proc_available_memory( void );
+                        unsigned long long avail_mb =
+                            (unsigned long long)os_proc_available_memory() >> 20;
+                        unsigned long long limit_mb = fp_mb + avail_mb;
+
+                        dprintf(2, "[footprint] rev=ml1219 phys=%llu MB (peak %llu) internal=%llu MB "
+                                "compressed=%llu MB external=%llu MB reusable=%llu MB avail=%llu MB "
+                                "limit=%llu MB (cycle=%u)\n",
+                                fp_mb, peak_mb,
+                                (unsigned long long)vmi.internal >> 20,
+                                (unsigned long long)vmi.compressed >> 20,
+                                (unsigned long long)vmi.external >> 20,
+                                (unsigned long long)vmi.reusable >> 20,
+                                avail_mb, limit_mb, cycle);
+                    }
                 }
             }
             /* ml566: WHEN does the host malloc zone become corrupt?
@@ -1969,12 +1990,32 @@ static void ios_jumbo_census( void *hint, size_t size, void *result, unsigned st
  * is the ceiling until CEF itself is made to want less. Record each range and
  * attribute every MEM_COMMIT that lands inside one. */
 #define IOS_BIGRES_MAX 48
-static struct { uint64_t base, size, committed; unsigned commits; } ios_bigres_tab[IOS_BIGRES_MAX];
+/* ml1219: `committed` IS A SUM OF COMMIT CALLS, NOT A UNION OF PAGES.
+ *
+ * ROTTR's 768MB reserve (log 2026-10-18 12:39) reported committed=774MB of a
+ * 768MB range -- 100% of a number that cannot exceed its own total, which is
+ * how a caller's re-commit of pages it already holds reads as "the heap is
+ * full". Windows lets a program commit the same pages again; every such call
+ * added its whole size here. A reader then takes a 100% for exhaustion when
+ * nothing has been proved, which is exactly the mistake this table exists to
+ * prevent. So count BOTH: the call sum stays (it is comparable with every
+ * earlier run and with the guest's own commit pattern), and `union_bytes` is
+ * the set of 4MB granules inside the range that any commit has ever covered --
+ * rpmalloc's medium page, so the granularity matches the allocator that asks.
+ * A range too large for the bitmap is reported as n/a rather than guessed. */
+#define IOS_BIGRES_GRANULE (4u << 20)
+#define IOS_BIGRES_WORDS   64      /* 64 x 64 bits x 4MB = 16GB per range */
+static struct {
+    uint64_t base, size, committed, union_bytes;
+    unsigned commits, nbits;
+    uint64_t bits[IOS_BIGRES_WORDS];
+} ios_bigres_tab[IOS_BIGRES_MAX];
 static unsigned ios_bigres_cnt;
 
 static void ios_bigres_note( void *base, size_t size )
 {
     if (!base || ios_bigres_cnt >= IOS_BIGRES_MAX) return;
+    memset( &ios_bigres_tab[ios_bigres_cnt], 0, sizeof(ios_bigres_tab[0]) );
     ios_bigres_tab[ios_bigres_cnt].base = (uint64_t)(uintptr_t)base;
     ios_bigres_tab[ios_bigres_cnt].size = size;
     ios_bigres_cnt++;
@@ -1985,12 +2026,30 @@ static void ios_bigres_commit( void *addr, size_t size )
     uint64_t a = (uint64_t)(uintptr_t)addr;
     unsigned i;
     for (i = 0; i < ios_bigres_cnt; i++)
-        if (a >= ios_bigres_tab[i].base && a < ios_bigres_tab[i].base + ios_bigres_tab[i].size)
+    {
+        uint64_t b = ios_bigres_tab[i].base, rsize = ios_bigres_tab[i].size;
+        uint64_t off, first, last, g;
+
+        if (a < b || a >= b + rsize) continue;
+        ios_bigres_tab[i].committed += size;
+        ios_bigres_tab[i].commits++;
+        if (!ios_bigres_tab[i].nbits)
+            ios_bigres_tab[i].nbits = (unsigned)min( (rsize + IOS_BIGRES_GRANULE - 1) / IOS_BIGRES_GRANULE,
+                                                     (uint64_t)IOS_BIGRES_WORDS * 64 );
+        off = a - b;
+        first = off / IOS_BIGRES_GRANULE;
+        last = (off + size + IOS_BIGRES_GRANULE - 1) / IOS_BIGRES_GRANULE;
+        if (last > ios_bigres_tab[i].nbits) last = ios_bigres_tab[i].nbits;
+        for (g = first; g < last; g++)
         {
-            ios_bigres_tab[i].committed += size;
-            ios_bigres_tab[i].commits++;
-            return;
+            uint64_t *w = &ios_bigres_tab[i].bits[g / 64];
+            uint64_t m = 1ULL << (g % 64);
+
+            if (!(*w & m)) { *w |= m; ios_bigres_tab[i].union_bytes += IOS_BIGRES_GRANULE; }
         }
+        if (ios_bigres_tab[i].union_bytes > rsize) ios_bigres_tab[i].union_bytes = rsize;
+        return;
+    }
 }
 
 /* ml435 (#73): FEX-band span lifecycle census. ml434 filled the band solid
@@ -2072,27 +2131,39 @@ static void ios_bigres_release( void *base )
 static void ios_bigres_report( const char *why )
 {
     unsigned i;
-    unsigned long long res = 0, com = 0, touched = 0;
+    unsigned long long res = 0, com = 0, uni = 0, touched = 0;
     for (i = 0; i < ios_bigres_cnt; i++)
     {
         res += ios_bigres_tab[i].size;
         com += ios_bigres_tab[i].committed;
+        uni += ios_bigres_tab[i].union_bytes;
         if (ios_bigres_tab[i].committed) touched++;
     }
-    dprintf(2, "[bigres-use] ranges=%u reserved=%llu MB committed=%llu MB (%llu%%) touched=%llu/%u (%s)\n",
+    dprintf(2, "[bigres-use] ranges=%u reserved=%llu MB committed=%llu MB (%llu%% of the reserved "
+               "total, call sum) union=%llu MB (%llu%% of the reserved total, pages) touched=%llu/%u (%s)\n",
             ios_bigres_cnt, res >> 20, com >> 20,
-            res ? (com * 100) / res : 0, touched, ios_bigres_cnt, why);
+            res ? (com * 100) / res : 0, uni >> 20, res ? (uni * 100) / res : 0,
+            touched, ios_bigres_cnt, why);
     for (i = 0; i < ios_bigres_cnt; i++)
         if (ios_bigres_tab[i].size >= 0x40000000ULL)
-            dprintf(2, "[bigres-use]   POOL 0x%llx +%lluMB committed=%lluMB (%llu%%) in %u calls\n",
+        {
+            uint64_t c = ios_bigres_tab[i].committed, u = ios_bigres_tab[i].union_bytes;
+
+            /* ml1219: a call sum above 100% is normal (re-commits) and the page
+             * union is the number that answers "is this range full". Say which
+             * one is which instead of letting the bigger one read as the truth. */
+            dprintf(2, "[bigres-use]   POOL 0x%llx +%lluMB committed=%lluMB (%llu%%, call sum) "
+                       "union=%lluMB (%llu%%, pages%s) in %u calls\n",
                     ios_bigres_tab[i].base, ios_bigres_tab[i].size >> 20,
-                    ios_bigres_tab[i].committed >> 20,
-                    ios_bigres_tab[i].size ? (ios_bigres_tab[i].committed * 100) / ios_bigres_tab[i].size : 0,
-                    ios_bigres_tab[i].commits);
+                    c >> 20, ios_bigres_tab[i].size ? (c * 100) / ios_bigres_tab[i].size : 0,
+                    u >> 20, ios_bigres_tab[i].size ? (u * 100) / ios_bigres_tab[i].size : 0,
+                    ios_bigres_tab[i].nbits ? "" : " n/a", ios_bigres_tab[i].commits);
+        }
     for (i = 0; i < ios_bigres_cnt && i < 8; i++)
-        dprintf(2, "[bigres-use]   0x%llx +%lluMB committed=%lluMB in %u calls\n",
+        dprintf(2, "[bigres-use]   0x%llx +%lluMB committed=%lluMB union=%lluMB in %u calls\n",
                 ios_bigres_tab[i].base, ios_bigres_tab[i].size >> 20,
-                ios_bigres_tab[i].committed >> 20, ios_bigres_tab[i].commits);
+                ios_bigres_tab[i].committed >> 20, ios_bigres_tab[i].union_bytes >> 20,
+                ios_bigres_tab[i].commits);
 }
 
 
@@ -5935,6 +6006,131 @@ static void ios_alloc_caller_dump( const char *tag, unsigned long *calls )
     }
 }
 
+/* ml1219: THE LAST REFUSALS, KEPT FOR THE TERMINATE PATH.
+ *
+ * Requested from the 2026-10-18 12:39 report: "log every NtTerminateProcess /
+ * ExitProcess with the exit code, the caller and the last failed allocation
+ * (size, status)". The exit code and the caller already existed ([term-stack]);
+ * the last refusal did not, and it is the field that joins a death to a reason:
+ * a process that dies right after "1758268 bytes refused" and one that dies
+ * with a clean heap are identical in a log that records only the termination.
+ *
+ * A RING of four, not a single record: the refusal that kills a run is usually
+ * not the last one attempted -- a refusing allocator is retried, and the retry
+ * chain runs until the end -- so the four slots keep the chain (alloc-fail,
+ * alloc-fail-ex, map-fail, whichever repeated) for four lines at terminate time.
+ *
+ * Cost per refusal: scalar stores plus ONE image lookup (a linear scan over the
+ * registered images). No mach_vm_read, no fault risk, no logging -- the
+ * expensive attribution (guest stack scan) stays in ios_alloc_caller_dump
+ * behind its own budget. This one must run on EVERY refusal or the record lies
+ * about "last": the [alloc-fail]/[alloc-fail-ex]/[map-fail] print sites are
+ * budgeted (64 / 64 / 32 then every 64th or 32nd) and a failure that fell
+ * outside the budget is exactly the one a silent death leaves behind. */
+#define IOS_LASTFAIL_MAX 4
+struct ios_lastfail_rec {
+    const char *tag;
+    unsigned long long size, seq, rip, base;
+    unsigned status, type, tid;
+};
+static struct ios_lastfail_rec ios_lastfail[IOS_LASTFAIL_MAX];
+static unsigned long long ios_lastfail_seq;
+
+void ios_lastfail_note( const char *tag, unsigned long long size, unsigned status, unsigned type )
+{
+    unsigned slot = (unsigned)(ios_lastfail_seq % IOS_LASTFAIL_MAX);
+    TEB *teb = NtCurrentTeb();
+    unsigned long long rip = 0;
+
+    if (teb && teb->ChpeV2CpuAreaInfo && teb->ChpeV2CpuAreaInfo->ContextAmd64)
+        rip = *(ULONG64 *)((char *)teb->ChpeV2CpuAreaInfo->ContextAmd64 + 0xF8);
+
+    ios_lastfail_seq++;
+    ios_lastfail[slot].tag = tag;
+    ios_lastfail[slot].size = size;
+    ios_lastfail[slot].status = status;
+    ios_lastfail[slot].type = type;
+    ios_lastfail[slot].rip = rip;
+    ios_lastfail[slot].base = rip ? ios_jit_module_base_for_va( rip, NULL ) : 0;
+    ios_lastfail[slot].tid = teb ? (unsigned)(ULONG_PTR)teb->ClientId.UniqueThread : 0;
+    ios_lastfail[slot].seq = ios_lastfail_seq;
+}
+
+/* Name a guest VA as image+offset. The same MZ/export-directory walk
+ * ios_alloc_caller_dump does inline; kept separate so the terminate path can
+ * name a module without touching the guest stack. */
+static const char *ios_lastfail_image( unsigned long long va, unsigned long long *off )
+{
+    unsigned long long base = ios_jit_module_base_for_va( va, NULL );
+    const unsigned char *mb;
+    unsigned int e_lf, exp_rva, name_rva;
+
+    if (off) *off = base ? va - base : 0;
+    if (!base) return "(unattributed)";
+    mb = (const unsigned char *)(uintptr_t)base;
+    if (!(mb[0] == 'M' && mb[1] == 'Z')) return "(not-PE)";
+    if ((e_lf = *(const unsigned int *)(mb + 0x3c)) < 0x1000 &&
+        (exp_rva = *(const unsigned int *)(mb + e_lf + 0x88)) &&
+        (name_rva = *(const unsigned int *)(mb + exp_rva + 0x0c)))
+        return (const char *)(mb + name_rva);
+    return "(exe)";
+}
+
+/* One line, for the per-termination record: the newest refusal, or "none".
+ * Deliberately returns what a reader needs to correlate -- tag, size, status
+ * -- and nothing that needs another lookup. */
+void ios_lastfail_summary( char *buf, size_t len )
+{
+    unsigned i, newest = IOS_LASTFAIL_MAX;
+
+    for (i = 0; i < IOS_LASTFAIL_MAX; i++)
+        if (ios_lastfail[i].seq &&
+            (newest == IOS_LASTFAIL_MAX || ios_lastfail[i].seq > ios_lastfail[newest].seq))
+            newest = i;
+    if (newest == IOS_LASTFAIL_MAX)
+    {
+        snprintf( buf, len, "none (no allocation was refused in this process)" );
+        return;
+    }
+    snprintf( buf, len, "%s size=0x%llx status=%08x type=0x%x tid=%04x seq=%llu",
+              ios_lastfail[newest].tag, ios_lastfail[newest].size,
+              ios_lastfail[newest].status, ios_lastfail[newest].type,
+              ios_lastfail[newest].tid, ios_lastfail[newest].seq );
+}
+
+/* The whole ring, oldest first, for a termination that gets the full dump. */
+void ios_lastfail_dump( const char *why )
+{
+    struct ios_lastfail_rec out[IOS_LASTFAIL_MAX];
+    unsigned i, n = 0;
+
+    for (i = 0; i < IOS_LASTFAIL_MAX; i++)
+        if (ios_lastfail[i].seq) out[n++] = ios_lastfail[i];
+
+    if (!n)
+    {
+        dprintf( 2, "[alloc-last] %s: no allocation was ever refused in this process\n", why );
+        return;
+    }
+    for (i = 1; i < n; i++)          /* insertion sort by seq: the ring wrapped */
+    {
+        struct ios_lastfail_rec key = out[i];
+        unsigned j = i;
+        while (j > 0 && out[j-1].seq > key.seq) { out[j] = out[j-1]; j--; }
+        out[j] = key;
+    }
+    dprintf( 2, "[alloc-last] %s: %u most recent refusals, oldest first\n", why, n );
+    for (i = 0; i < n; i++)
+    {
+        unsigned long long off = 0;
+        const char *name = ios_lastfail_image( out[i].rip, &off );
+
+        dprintf( 2, "[alloc-last]   #%llu %s size=0x%llx status=%08x type=0x%x tid=%04x caller=%s+0x%llx\n",
+                 out[i].seq, out[i].tag, out[i].size, out[i].status, out[i].type,
+                 out[i].tid, out[i].rip ? name : "(no guest context)", off );
+    }
+}
+
 /* task #34 [x86-ptr]: is `va` a GUEST INSTRUCTION address — a pointer into the
  * executable section of an x86-64 module?
  *
@@ -8282,6 +8478,7 @@ static const char *ios_scan_stop_name( int stop )
     case 3: return "window<size@entry(top-down)";
     case 4: return "gaps-exhausted(top-down)";
     case 9: return "no-views-in-range";
+    case 10: return "window-above-task-map";
     default: return "?";
     }
 }
@@ -13231,6 +13428,54 @@ static struct wine_rb_entry *find_view_inside_range( void **base_ptr, void **end
  * Try mmaping some expected free memory region, eventually stepping and
  * retrying inside it, and return where it actually succeeded, or NULL.
  */
+/* ml1219: THE END OF THE TASK'S MAP, NOT THE END OF THE GUEST'S.
+ *
+ * ROTTR on iPhone18,3 / iOS 27.0.1 (log 2026-10-18 12:39, [device] launch
+ * address-map=[0x1024c8000,0x7180000000)) has a guest whose window reaches
+ * 0x73ffff0000 while the kernel's map for the task stops at 0x7180000000:
+ * 36.7 GB of the address space Wine places into does not exist. Every
+ * mach_vm_map(VM_FLAGS_FIXED) above that ceiling is refused with KERN_NO_SPACE
+ * (errno EEXIST after anon_mmap_tryfixed's encoding), and mach_vm_region finds
+ * nothing there, so ios_skip_occupied has nothing to jump over and the scanner
+ * crawls the dead band one 64KB granule at a time. Measured cost in that run:
+ * 163724 refused mappings in ONE map_free_area call, and 66 [va-scan] FAILED
+ * lines in the log. ml787 already clamps its CENSUS to TASK_VM_INFO.max_address
+ * for exactly this reason ("no mappings here" is not "usable"); the scanner
+ * itself was never told. It is now, at the top of map_free_area_inner. */
+static ULONG_PTR ios_scan_task_end( void )
+{
+    static ULONG_PTR cached;                     /* 0 = not asked yet */
+    task_vm_info_data_t vmi;
+    mach_msg_type_number_t cnt = TASK_VM_INFO_COUNT;
+    static int said;
+
+    if (cached) return cached;
+    /* A kernel that does not report it must not be second-guessed: ~0 makes
+     * every clamp below a no-op, i.e. the pre-ml1219 behaviour. */
+    if (task_info( mach_task_self(), TASK_VM_INFO, (task_info_t)&vmi, &cnt ) != KERN_SUCCESS ||
+        vmi.max_address < 0x100000000ULL)
+    {
+        cached = ~(ULONG_PTR)0;
+        return cached;
+    }
+
+    cached = (ULONG_PTR)vmi.max_address;
+    if (!said++)
+    {
+        dprintf( 2, "[va-ceiling] ml1219 TASK_VM_INFO.max_address=%p (%.1f GB) | top of the guest "
+                    "address space=%p (%.1f GB)\n",
+                 (void *)cached, (double)cached / (1024.0*1024.0*1024.0),
+                 (void *)(ULONG_PTR)user_space_limit,
+                 (double)(ULONG_PTR)user_space_limit / (1024.0*1024.0*1024.0) );
+        if ((ULONG_PTR)user_space_limit > cached)
+            dprintf( 2, "[va-ceiling] ml1219 %.1f GB of the guest's address space is ABOVE the task "
+                        "map: a fixed placement there can never succeed, and a scan that walks it "
+                        "pays one refused mapping per granule to learn that\n",
+                     (double)((ULONG_PTR)user_space_limit - cached) / (1024.0*1024.0*1024.0) );
+    }
+    return cached;
+}
+
 /* ml211: ask Mach where the mapping occupying `addr` ends, so the scan can jump over it.
  *
  * Wine's rb tree only knows Wine's OWN views (53 in a Steam run), but the [furniture]
@@ -13341,6 +13586,46 @@ static void* try_map_free_area( void *base, void *end, ptrdiff_t step,
                     start = ROUND_ADDR( (char *)(pool_base - size), (size_t)(-step) - 1 );
                 }
                 else start = (void *)((pool_end + (size_t)step - 1) & ~((uintptr_t)step - 1));
+                continue;
+            }
+        }
+        /* ml1219: THE FEX ARENA IS A RESERVATION, NOT A VIEW — JUMP IT, DO NOT
+         * PROBE IT.
+         *
+         * ROTTR's 12:39 run reported 21 [va-scan] FAILED lines whose firstfail
+         * was followed by "OCCUPIED 0x70dc010000+0x4000000 prot=0/7 shared=0":
+         * a 64MB Mach region with current protection VM_PROT_NONE, max
+         * VM_PROT_ALL, which is the exact signature of the emulator arena
+         * (mach_vm_map(..., PROT_NONE, VM_PROT_ALL, VM_INHERIT_COPY) in
+         * ios_reserve_fex_arena) and NOT of any view. The arena is held that
+         * way "natively as PROT_NONE for the process lifetime" and registered
+         * FEX_ONLY, so it is invisible to the views tree the scan walks, and
+         * the uncarved remainder between two carved slices is reported by
+         * mach_vm_region in whatever size happens to be left over (64MB,
+         * 16MB, 8MB, 176KB in this run's eight distinct blockers).
+         *
+         * map_reserved_area has already declined this request — that is the
+         * only way to reach the generic scan with the arena in the window
+         * (fex_arena_covers accepts a request only when its limits are
+         * INSIDE the arena). So no byte of it is available here, and the
+         * honest move is one jump instead of one refused mapping per remnant.
+         * Answers "who owns them": the arena does. */
+        {
+            ULONG_PTR a = (uintptr_t)start, ab = ios_fex_arena_base_unix, ae = ios_fex_arena_end_unix;
+
+            if (ab && ae > ab && a < ae && a + size > ab)
+            {
+                static int skipped;
+                if (skipped++ < 8)
+                    dprintf( 2, "[fex-arena] SKIP scan over the FEX_ONLY arena at %p -> %p "
+                                "(uncarved PROT_NONE reservation, not a view)\n",
+                             start, (void *)ae );
+                if (step < 0)
+                {
+                    if (ab < size) break;
+                    start = ROUND_ADDR( (char *)(ab - size), (size_t)(-step) - 1 );
+                }
+                else start = (void *)((ae + (size_t)step - 1) & ~((uintptr_t)step - 1));
                 continue;
             }
         }
@@ -13456,6 +13741,33 @@ static void *map_free_area_inner( void *base, void *end, size_t size, int top_do
     ios_scan_stop = first ? 0 : 9;
     ios_scan_fail_addr = NULL;
     ios_scan_fail_errno = 0;
+
+    /* ml1219: clamp the window to the task's own map before a single granule is
+     * probed — see ios_scan_task_end for what walking past it costs. Measured
+     * on device: end=0x73ffff0000 against max_address=0x7180000000, i.e. 36.7GB
+     * of the window is outside the map and every step in it is one refused
+     * mach_vm_map. The clamp can only remove work that could never succeed;
+     * a request that genuinely needs the space above the ceiling does not
+     * exist (the kernel would refuse it), and the caller's relax path is
+     * untouched. Reported, never silent: the geometry this scan was given and
+     * the geometry it used are both in the [va-scan] line. */
+    {
+        ULONG_PTR task_end = ios_scan_task_end();
+
+        if (task_end && task_end != ~(ULONG_PTR)0 && (ULONG_PTR)end > task_end)
+        {
+            static unsigned long clamped;
+
+            if (clamped++ < 8)
+                dprintf( 2, "[va-ceiling] ml1219 window end %p is above the task map end %p: "
+                            "clamping the scan (%.1f GB outside the task's map)\n",
+                         end, (void *)task_end,
+                         (double)((ULONG_PTR)end - task_end) / (1024.0*1024.0*1024.0) );
+            end = (void *)task_end;
+            ios_scan_end = end;
+        }
+        if (end <= base) { ios_scan_stop = 10; return NULL; }
+    }
 
     if (top_down)
     {
@@ -19720,6 +20032,42 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
         void *start = address_space_start;
         void *end = min( user_space_limit, host_addr_space_limit );
         void *wow_hi_start = NULL, *wow_hi_end = NULL;   /* madeira-bcd: band above the 32-bit windows */
+
+        /* ml1219: the window may not reach past the end of the task's own map.
+         *
+         * ROTTR 12:39 (iPhone18,3 / iOS 27.0.1) is the measurement: [va-limit]
+         * ml749 walk=0x8000000000 kernel_max=0x7180000000 -> keeping walk, and
+         * ml749 deliberately only ever RAISES (a bogus small max_address must
+         * not shrink a working limit), so host_addr_space_limit stayed at the
+         * power-of-two 512GB and ml990 propagated it to user_space_limit. The
+         * furniture ceiling then capped the scan at 0x73ffff0000 and the window
+         * became 0x7020000000..0x73ffff0000 -- whose top 36.7GB is above
+         * max_address and refused for every fixed mapping. mach_vm_region finds
+         * nothing there, so nothing is "occupied", so ios_skip_occupied has
+         * nothing to jump over: 163724 refused mappings in one map_free_area
+         * call, and a 53.9s stall watch in the same run.
+         *
+         * Clamping the SEARCH BOUND is not the raise-only policy being reversed:
+         * what applications are told about the address space (and every
+         * is_beyond_limit call that uses host_addr_space_limit) is untouched.
+         * This only stops the scanner from walking VA that the kernel has
+         * already refused by construction. Reported, never silent. */
+        {
+            ULONG_PTR task_end = ios_scan_task_end();
+
+            if (task_end != ~(ULONG_PTR)0 && (ULONG_PTR)end > task_end)
+            {
+                static unsigned long clamped;
+                if (clamped++ < 8)
+                    dprintf( 2, "[va-ceiling] ml1219 search window end %p -> %p (the task's "
+                                "max_address): %.1f GB of the window is above the task's map and "
+                                "can never host a fixed placement\n",
+                             end, (void *)task_end,
+                             (double)((ULONG_PTR)end - task_end) / (1024.0*1024.0*1024.0) );
+                end = (void *)task_end;
+            }
+        }
+
         /* task #35 furniture ceiling — see its definition. Kernel-pick views
          * below 16GB (TEBs, stacks, anon views, section views incl. the 4GB
          * top-of-space tenant from ml106) stay below 464G-64K; only the PA
@@ -28640,6 +28988,9 @@ NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR z
             static unsigned long af_n;
             static unsigned long af_caller_n;
             unsigned long n = ++af_n;
+            /* ml1219: record BEFORE the print budget -- a refusal that fell
+             * outside the budget is exactly the one a silent death leaves. */
+            ios_lastfail_note( "alloc-fail", (unsigned long long)jumbo_size, (unsigned)st, (unsigned)type );
             if (n <= 64 || (n % 64) == 0)
             {
                 dprintf( 2, "[alloc-fail] ml814 #%lu status=%08x hint=%p size=0x%llx type=0x%x "
@@ -30094,6 +30445,8 @@ retry_code_carve_reuse:
             static unsigned long aex_n;
             static unsigned long aex_caller_n;
             unsigned long i2 = ++aex_n;
+            ios_lastfail_note( "alloc-fail-ex", (unsigned long long)(size_ptr ? *size_ptr : 0),
+                               (unsigned)st, (unsigned)type );   /* ml1219, before the budget */
             if (i2 <= 64 || (i2 % 64) == 0)
             {
                 dprintf( 2, "[alloc-fail-ex] ml1217 #%lu NtAllocateVirtualMemoryEx status=%08x "
@@ -32268,6 +32621,10 @@ static void ios_map_fail( const char *who, unsigned int status, HANDLE handle, H
 {
     static unsigned long n;
     unsigned long i = ++n;
+
+    /* ml1219: recorded before the print budget, so the terminate path can name
+     * the section mapping a dying process last had refused. */
+    ios_lastfail_note( "map-fail", (unsigned long long)size, status, (unsigned)alloc_type );
 
     /* Every failing return, including the guest's own parameter rejections:
      * STATUS_INVALID_PARAMETER_* and STATUS_MAPPED_ALIGNMENT are self-evident

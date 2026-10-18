@@ -3240,15 +3240,62 @@ NTSTATUS WINAPI NtTerminateProcess( HANDLE handle, LONG exit_code )
 #ifdef WINE_IOS
     if ((unsigned int)exit_code == 0xE0000008u && handle == NtCurrentProcess())
         ios_term_oom_record( NtCurrentTeb() );
+    /* ml1219: ONE LINE PER TERMINATION, NO BUDGET, PLUS THE LAST REFUSAL.
+     *
+     * Requested from the 2026-10-18 12:39 report: "log every NtTerminateProcess
+     * / ExitProcess with the exit code, the caller and the last failed
+     * allocation (size, status)". The 12:39 log had ZERO [term-stack] lines in
+     * 39k lines -- not because the budget blocked a dump but because nothing in
+     * that run ever terminated: the log simply stops at 12:43:47 with the game
+     * presenting frames and no teardown of any kind. So the always-on line is
+     * the point: whoever reads a log of a run that died will see the LAST
+     * termination before it (or none), and if a process does call
+     * NtTerminateProcess the exit code, the caller's guest RIP and the last
+     * refused allocation are all in it.
+     *
+     * Cheap by construction: two scalars from the FEX state, no stack read, no
+     * image name resolution, one dprintf. The heavy dump below keeps its own
+     * (now larger) budget -- this line must never be the reason a run is
+     * slowed down or a log is flooded. */
+    {
+        static unsigned long term_all;
+        extern void ios_lastfail_summary( char *buf, size_t len );
+        TEB *term_teb = NtCurrentTeb();
+        CHPE_V2_CPU_AREA_INFO *term_area = term_teb ? term_teb->ChpeV2CpuAreaInfo : NULL;
+        void *term_state = term_area ? *(void **)((char *)term_area + 0x30) : NULL;
+        unsigned long long term_rip = term_state ? *(const uint64_t *)((const char *)term_state + 0x18) : 0;
+        char lastfail[288];
+
+        term_all++;
+        ios_lastfail_summary( lastfail, sizeof(lastfail) );
+        dprintf( 2, "[term] #%lu handle=%p exit=%08x self=%d pid=%04x tid=%04x guest_rip=0x%llx"
+                    " | last-refused: %s\n",
+                 term_all, handle, (unsigned)exit_code, handle == NtCurrentProcess(),
+                 term_teb ? (unsigned)(ULONG_PTR)term_teb->ClientId.UniqueProcess : 0,
+                 term_teb ? (unsigned)(ULONG_PTR)term_teb->ClientId.UniqueThread : 0,
+                 term_rip, lastfail );
+    }
     {
         static int term_log_count = 0;
-        /* iOS-Madeira [term-stack] (task#29): also fire on ANY nonzero exit_code
+        /* iOS-Madeira [term-stack] (task#29): fire on ANY nonzero exit_code
          * (capped) so Steam's deliberate ExitProcess(-104) bootstrapper bail is
-         * captured — the first-3 slots are consumed by early exit-0 procs
+         * captured — the first slots are consumed by early exit-0 procs
          * (cmd/start.exe) before steam.exe ever runs. The dump below (guest RIP +
-         * emulator-stack code-address scan) names which steam.exe code path bails. */
-        if (term_log_count < 3 || (exit_code != 0 && term_log_count < 24)) {
+         * emulator-stack code-address scan) names which steam.exe code path bails.
+         *
+         * ml1219: the caps were 3 and 24, chosen when a full dump was the only
+         * record of a termination. Every termination now has its [term] line, so
+         * these caps only decide who gets the expensive dump: 16 exit-0 (a full
+         * launcher chain, cmd/start/wineboot/services, still fits) and 64
+         * nonzero. Two per-launch runs in a row ended with no [term-stack] at
+         * all, and in both the question was "what ended this" — the budget can
+         * no longer be the reason an answer is missing. */
+        if (term_log_count < 16 || (exit_code != 0 && term_log_count < 64)) {
+            extern void ios_lastfail_dump( const char *why );
             term_log_count++;
+            /* ml1219: the refusals, before the stack dump -- a death that
+             * follows a refusal is read in one place. */
+            ios_lastfail_dump( "NtTerminateProcess" );
             extern volatile uint64_t g_wine_dispatcher_count;
             extern volatile uint64_t g_wine_unix_call_count;
             ERR("NtTerminateProcess(handle=%p, exit_code=0x%x) syscalls=%llu unix_calls=%llu\n",
