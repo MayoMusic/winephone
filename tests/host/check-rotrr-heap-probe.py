@@ -9,22 +9,30 @@ The reporter asks {+0xd0} for that number and {+0xd0} is literally
 "mstate[0x868] - this[0x40] - this[0x38]", while the singleton's mstate[0x868]
 is its 768 MB arena and the dialog printed 981.1 MB. So the probe walks the
 allocator-object chain ([0x141006d78], linked through this+0x10 at
-construction) and prints each object. Six properties matter, each one a real
-failure mode:
+construction) and prints each object.
+
+ml1222: that chain head is a RELOCATED address on the device -- the 16:39 /
+16:53 logs show ROTTR.exe at 0x12c000000 / 0x1246e0000 with entry = base +
+0xcc7a70 (the file's entry RVA), i.e. VA = base + RVA.  The probe must
+resolve the entry (ios_jit_mappings: pe_base = guest image, jit_base = the
+JIT pool copy), read the statics at BOTH candidates, and let the live pointer
+decide.  Seven properties matter, each one a real failure mode:
 
   1. it exists and is called from the warmer tick (a probe that is never
      called reads as a clean run);
   2. every guest read goes through mach_vm_read_overwrite (a dereference of
-     0x141006d80 before ROTTR.exe is mapped would crash the app -- the same
+     the statics before ROTTR.exe is mapped would crash the app -- the same
      mistake virtual_ios.c documents twice at other sites);
   3. it is gated on MADEIRA_ROTRR_HEAP_PROBE and stays silent otherwise (a
      hard-coded guest VA is only correct for this game);
-  4. it reads the chain, not one object: head at image base + 0x1006d78,
-     next-previous at this+0x10, bounded so a stale link cannot spin;
-  5. the addresses it reads stay the traced ones (singleton pointer global at
-     image base + 0x1006d80, mstate at this+0x48, capacity at mstate+0x868 --
-     NOT +0x820, which is the 0x10 alloc grain);
-  6. the printed name cannot inject format directives ('%' is folded).
+  4. it resolves the module at runtime and reads the chain, not one object:
+     singleton pointer RVA 0x1006d80 and head RVA 0x1006d78 at both the image
+     and the pool copy, next-previous at this+0x10, bounded so a stale link
+     cannot spin;
+  5. the addresses it reads stay the traced ones (mstate at this+0x48,
+     capacity at mstate+0x868 -- NOT +0x820, which is the 0x10 alloc grain);
+  6. the printed name cannot inject format directives ('%' is folded);
+  7. no absolute 0x141 static VAs come back (the image is relocated).
 """
 import os
 import sys
@@ -56,10 +64,18 @@ check("the probe refuses to run when not wanted",
       "if (!ios_rotrr_heap_probe_wanted()) return;" in text)
 check("the probe is called from the warmer tick",
       "if ((cycle % 5) == 0) ios_rotrr_heap_probe();" in text)
-check("the probe reads the ROTTR singleton pointer global",
-      "0x141006d80ULL" in text)
-check("the probe reads the allocator-object chain head",
-      "0x141006d78ULL" in text)
+check("the probe resolves ROTTR.exe at runtime (the image is relocated)",
+      "static int ios_rotrr_probe_locate(" in text)
+check("the resolver walks the host image table and matches the module name",
+      "ios_jit_mappings[i].pe_base" in text and 'strstr( n, "ROTTR" )' in text)
+check("the resolver reads the PE-view signature through the checked reader",
+      "mz != 0x5a4d" in text)
+check("the probe reads the singleton pointer RVA at BOTH candidates",
+      "img + 0x1006d80ULL" in text and "pool + 0x1006d80ULL" in text)
+check("the probe reads the chain-head RVA at BOTH candidates",
+      "img + 0x1006d78ULL" in text and "pool + 0x1006d78ULL" in text)
+check("no hard-coded absolute statics remain",
+      "0x141006d78ULL" not in text and "0x141006d80ULL" not in text)
 check("the chain walk goes through this+0x10",
       "cur + 0x10" in text)
 check("the chain walk is bounded", "i < 15" in text)

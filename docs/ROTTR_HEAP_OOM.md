@@ -86,9 +86,19 @@ key absent from this list was not set:
   pool`), swap off (no `[swap] ml1077 ... tier ON` line), the video budget
   automatic (`[wmt] ml1042 video memory budget = 1024 MB`).
 - 2026-10-18: `map-trace = 1`; ml1221 adds `env.MADEIRA_ROTRR_HEAP_PROBE = 1`.
+- 2026-10-18 runs, as echoed by both logs (16:39 and 16:53): `eco = 1`,
+  `env.MADEIRA_SWAP_COVERAGE = blocks`, `map-trace = 1`, `pool = 512`,
+  `swap-mb = 2048`, `vram-mb = 2048`; the game's own config (`[game-cfg]`) is
+  exactly `env.MADEIRA_EC_HOOK_TRACE=0 env.MADEIRA_ROTRR_HEAP_PROBE=1`, and
+  `[bcd] library launch ROTTR.exe: avx=0 wine-vcrt=0 nvidia=1 game-config=1`
+  (wine-vcrt is back to 0 in these runs). `pool = 512` is the value the
+  17-10 morning fatal runs used; the 17-10 evening 896 MB default no longer
+  applies.
 
 The patched `ROTTR.exe` is part of the configuration too: the 14:11 run is the
-768 MB one (`[guest-reserve] #1 0x713d900000+0x30000000 ... running_total=768MB`).
+768 MB one (`[guest-reserve] #1 0x713d900000+0x30000000 ... running_total=768MB`),
+and the 16:53 run repeats it at a different address
+(`#1 0x713cbf0000+0x30000000 ... running_total=768MB`).
 
 ## What the host did: nothing wrong
 
@@ -272,7 +282,40 @@ Note on the three fatal runs: their format prints the singleton's own name
 Either those binaries carried a larger arena constant (the patch tool accepts
 256-2048 MB values), or the value position in the format is not what it looks
 like; the probe's live `k868` line settles which. The 14:11 build is the
-patched-to-768 MB one (`[guest-reserve] ... running_total=768MB`).
+patched-to-768 MB one (`[guest-reserve] ... running_total=768MB`), and the
+16:53 run of 2026-10-18 repeats both facts: named fatal form, `requested
+870240` (the same size the 17-10 fatal runs asked), `total free 1004119216`
+(`0x3bd9a4b0`, 957.6 MB -- again above 768 MB).
+
+### The probe, revised once (ml1222)
+
+ml1221 read the statics at the absolute VA `0x141006d78` -- the address they
+have in a *not-relocated* image. On the device the image is relocated: the
+16:39 and 16:53 logs show ROTTR.exe at `0x12c000000` / `0x1246e0000` with
+entry `base + 0xcc7a70` (the file's entry RVA), and the .text range
+(`[iOS-xins] ... sec=base+0x1000 .. base+0xd012be`) confirms **VA = base +
+RVA**. `0x141006d78` fell inside the host's reserved 128 MB executable window
+("ml977: executable window [0x140000000,0x148000000) is reserved"), so the
+only `[rotrr-heap]` line both runs printed is the one-time "no allocator
+object yet".
+
+The host already records each image twice, in `ios_jit_mappings[]`:
+`pe_base` (the guest image mapping, where relocated absolute references land)
+and `jit_base` (the JIT pool copy FEX executes). The `[data-align]` +0x2000
+shift is already inside the recorded pool address (the copy's `.data` lands
+16K-aligned with it: pool ≡ 0x2000 mod 0x4000 and `.data` RVA 0xfb2000 ≡
+0x2000 mod 0x4000). ml1222 resolves ROTTR.exe by module name at runtime and
+reads the statics (RVA `0x1006d78` head, `0x1006d80` singleton pointer) at
+**both** candidates, printing one `found` line with all four raw values and
+which side won:
+
+```
+[rotrr-heap] rev=ml1222 ROTTR.exe img=0x1246e0000 pool=0x149836000 (ROTTR.exe)
+  cand img: sing=… head=… | cand pool: sing=… head=… -> live via=img|pool
+```
+
+From there the object/chain lines are unchanged. Whichever mapping is live is
+decided by the next run's log, not by assumption.
 
 ## What is still unknown
 
@@ -371,7 +414,10 @@ call sites that a signature scan can find.
    `1028736280` is the one that refused; its `k858`/`k860` then say how much of
    its arena was really consumed. (The first version, ml1220, read only the
    singleton -- which this build's 768 MB cap rules out for the 14:11 dialog;
-   hence the chain walk.)
+   hence the chain walk. ml1222 repaired the other half: the image is
+   relocated, so the statics are resolved from `ios_jit_mappings[]` at
+   runtime -- `pe_base` and `jit_base` -- instead of the file's `0x141...`
+   addresses.)
 
 All of these are host-side and none needs the executable.
 

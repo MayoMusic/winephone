@@ -1078,9 +1078,24 @@ static unsigned ios_warmer_sweep_cycles( void )
  * block it was handed (0x1403c7340) -- the latter can refuse without ever
  * reaching the host.
  *
+ * ml1222: the image is RELOCATED.  The 16:39/16:53 logs show ROTTR.exe at
+ * 0x12c000000 / 0x1246e0000 (entry 0x12ccc7a70 / 0x1253a7a70 = base +
+ * 0xcc7a70 = the file's entry RVA), so ml1221's hard-coded 0x141006d78 --
+ * the address the statics have in a not-relocated image -- landed in the
+ * host's reserved executable window, read nothing, and the probe stayed
+ * silent for both whole runs.  VA = base + RVA holds for both the guest image
+ * mapping (ios_jit_mappings[].pe_base, where relocated absolute references
+ * land) and the JIT pool copy (jit_base, what FEX executes); the statics are
+ * RVA 0x1006d78 (chain head) / 0x1006d80 (singleton pointer).  Resolve the
+ * entry from the host's own table at runtime and read the pair at BOTH
+ * candidates; the first with a live pointer wins, and one "found" line prints
+ * all four raw values so the log itself decides which mapping carries the
+ * game's live state.  (The +0x2000 data-align shift is already inside the
+ * recorded pool address -- copy .data lands page-aligned, [data-align].)
+ *
  * Reads go through mach_vm_read_overwrite -- an unmapped address is an error,
- * not a crash -- and every address is ROTTR.exe image base 0x140000000 + RVA.
- * Off unless MADEIRA_ROTRR_HEAP_PROBE=1.  See docs/ROTTR_HEAP_OOM.md. */
+ * not a crash.  Off unless MADEIRA_ROTRR_HEAP_PROBE=1.
+ * See docs/ROTTR_HEAP_OOM.md. */
 static int ios_rotrr_heap_probe_wanted( void )
 {
     static int v = -1;
@@ -1134,7 +1149,7 @@ static void ios_rotrr_probe_object( const char *tag, unsigned long long obj )
 
     if (!ios_rotrr_probe_read( obj + 0x28, obuf, sizeof(obuf) ))
     {
-        dprintf( 2, "[rotrr-heap] rev=ml1221 %s obj=%#llx unreadable\n", tag, obj );
+        dprintf( 2, "[rotrr-heap] rev=ml1222 %s obj=%#llx unreadable\n", tag, obj );
         return;
     }
     memcpy( &base,   obuf + 0x00, 4 );   /* this+0x28 arena base (32-bit by design) */
@@ -1150,7 +1165,7 @@ static void ios_rotrr_probe_object( const char *tag, unsigned long long obj )
 
     cap_obj = ((unsigned long long)limit - base) & 0xffffffffULL;
     ios_rotrr_probe_name( obj, name, sizeof(name) );
-    dprintf( 2, "[rotrr-heap] rev=ml1221 %s obj=%#llx base=%#x limit=%#x cap_obj=%llu allocs=%u "
+    dprintf( 2, "[rotrr-heap] rev=ml1222 %s obj=%#llx base=%#x limit=%#x cap_obj=%llu allocs=%u "
                 "used=%llu x40=%llu mstate=%#llx f50=%#x b51=%u b52=%u sub=%#llx name=\"%s\"\n",
              tag, obj, base, limit, cap_obj, allocs, used, x40, mstate, f50, b51, b52, sub, name );
 
@@ -1180,29 +1195,85 @@ static void ios_rotrr_probe_object( const char *tag, unsigned long long obj )
     /* The dialog's number, reproduced exactly as 0x1403c5d20 computes it.  On
      * the singleton this can never exceed its 768 MB arena; the 14:11 dialog
      * said 981.1 MB, so the object whose line matches is the one to blame. */
-    dprintf( 2, "[rotrr-heap] rev=ml1221 %s mvt=%#llx k818=%#llx k820=%#llx k828=%#llx k830=%#llx "
+    dprintf( 2, "[rotrr-heap] rev=ml1222 %s mvt=%#llx k818=%#llx k820=%#llx k828=%#llx k830=%#llx "
                 "k838=%#llx k858=%#llx k860=%#llx k868=%#llx free868=%lld w08=%#llx w10=%#llx "
                 "w18=%#llx w20=%#llx w28=%#llx w30=%#llx w38=%#llx\n",
              tag, mvt, k818, k820, k828, k830, k838, k858, k860, k868,
              (long long)(k868 - x40 - used), w08, w10, w18, w20, w28, w30, w38 );
 }
 
+/* ml1222: find ROTTR.exe in the host's own image table.  A slot only counts
+ * once its PE view actually reads (an MZ through the checked reader keeps a
+ * tombstoned slot from taking the call), live entries (unmapped==0) win, and
+ * pe_base/jit_base are the guest image mapping and the JIT pool copy.  The
+ * probe reads statics at BOTH candidates -- which one carries the game's
+ * live state is exactly what it is here to find out. */
+static int ios_rotrr_probe_locate( unsigned long long *img, unsigned long long *pool,
+                                   const char **mname )
+{
+    extern const char *ios_pe_module_name( const void *image_base, size_t image_size );
+    unsigned short mz = 0;
+    int i;
+
+    *img = 0;
+    *pool = 0;
+    if (mname) *mname = "?";
+    for (i = 0; i < ios_jit_mapping_count; i++)
+    {
+        unsigned long long b = (unsigned long long)(uintptr_t)ios_jit_mappings[i].pe_base;
+        const char *n;
+
+        if (!b || !ios_jit_mappings[i].size || ios_jit_mappings[i].unmapped) continue;
+        if (!ios_rotrr_probe_read( b, &mz, sizeof(mz) ) || mz != 0x5a4d) continue;   /* "MZ" */
+        n = ios_pe_module_name( (const void *)(uintptr_t)b, ios_jit_mappings[i].size );
+        if (!n || !strstr( n, "ROTTR" )) continue;
+        *img = b;
+        *pool = (unsigned long long)(uintptr_t)ios_jit_mappings[i].jit_base;
+        if (mname) *mname = n;
+        return 1;
+    }
+    return 0;
+}
+
 static void ios_rotrr_heap_probe( void )
 {
     static int said_unready;
+    static unsigned long long said_img, said_pool, said_base;
     unsigned long long head = 0, sing = 0, cur = 0, prev = 0;
-    int i;
+    unsigned long long img = 0, pool = 0, base = 0;
+    unsigned long long si = 0, hi = 0, sp = 0, hp = 0;
+    const char *mname = "?";
+    int i, via = 0;
 
     if (!ios_rotrr_heap_probe_wanted()) return;
-    if (!ios_rotrr_probe_read( 0x141006d80ULL, &sing, sizeof(sing) )) sing = 0;
-    if (!ios_rotrr_probe_read( 0x141006d78ULL, &head, sizeof(head) )) head = 0;
-    if (!sing && !head)
+    if (!ios_rotrr_probe_locate( &img, &pool, &mname ))
     {
         if (!said_unready++)
-            dprintf( 2, "[rotrr-heap] rev=ml1221 no allocator object yet (ROTTR.exe not loaded?) "
-                        "-- probe stays quiet until there is one\n" );
+            dprintf( 2, "[rotrr-heap] rev=ml1222 no ROTTR.exe image mapping yet -- probe stays "
+                        "quiet until there is one\n" );
         return;
     }
+    /* Singleton pointer global (RVA 0x1006d80) and chain head (RVA 0x1006d78)
+     * at both candidates; a failed read is 0, so an all-zero tuple means
+     * "mapped, nothing built yet". */
+    if (!ios_rotrr_probe_read( img + 0x1006d80ULL, &si, sizeof(si) )) si = 0;
+    if (!ios_rotrr_probe_read( img + 0x1006d78ULL, &hi, sizeof(hi) )) hi = 0;
+    if (!ios_rotrr_probe_read( pool + 0x1006d80ULL, &sp, sizeof(sp) )) sp = 0;
+    if (!ios_rotrr_probe_read( pool + 0x1006d78ULL, &hp, sizeof(hp) )) hp = 0;
+    if (si || hi)      { sing = si; head = hi; base = img;  via = 1; }
+    else if (sp || hp) { sing = sp; head = hp; base = pool; via = 2; }
+
+    if (img != said_img || pool != said_pool || base != said_base)
+    {
+        said_img = img;
+        said_pool = pool;
+        said_base = base;
+        dprintf( 2, "[rotrr-heap] rev=ml1222 ROTTR.exe img=%#llx pool=%#llx (%s) cand img: "
+                    "sing=%#llx head=%#llx | cand pool: sing=%#llx head=%#llx -> live via=%s\n",
+                 img, pool, mname, si, hi, sp, hp,
+                 via == 1 ? "img" : via == 2 ? "pool" : "none" );
+    }
+    if (!base) return;
     if (sing) ios_rotrr_probe_object( "sing", sing );
     cur = head;
     for (i = 0; i < 15 && cur; i++)
@@ -1478,9 +1549,10 @@ static void *ios_pool_warmer_thread( void *arg )
                                 (unsigned long long)vmi.reusable >> 20,
                                 avail_mb, limit_mb, cycle);
 
-                        /* ml1221: the game's own heap accounting, live (docs/ROTTR_HEAP_OOM.md).
+                        /* ml1222: the game's own heap accounting, live (docs/ROTTR_HEAP_OOM.md).
                          * ~every 10 s; every allocator object in the chain, not just the
-                         * singleton; a no-op unless MADEIRA_ROTRR_HEAP_PROBE=1. */
+                         * singleton; image/pool resolved at runtime (the image is relocated);
+                         * a no-op unless MADEIRA_ROTRR_HEAP_PROBE=1. */
                         if ((cycle % 5) == 0) ios_rotrr_heap_probe();
                     }
                 }
