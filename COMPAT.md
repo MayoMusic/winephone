@@ -54,26 +54,33 @@ text prints `0xC0000000 >> 20`. Of the 15 `VirtualAlloc` call sites in the
 binary this is the only one with a hard-coded size of 32 MB or more - the other
 14 take their size from a register. Because `MEM_RESERVE` commits nothing, the
 reservation is an address-space problem, not a RAM problem: see
-`docs/MEMORY_ENTITLEMENTS.md`. `tools/rotrr-heap-patch.py` lowers the constant.
+`docs/MEMORY_ENTITLEMENTS.md`. `tools/rotrr-heap-patch.py` retunes the
+constant; `--restore` puts the stock 3072 MB back, served on iOS by the host's
+boot holdback (`docs/ROTTR_HEAP_OOM.md`).
 
-**Patched and verified on device.** At 768 MB the reservation succeeds:
+**Patched and verified on device, then outgrown.** At 768 MB the reservation
+succeeds:
 
 ```
 [bigres] tid=007c #1 size=0x30000000 (768 MB) type=0x2000 prot=0x4
 [guest-reserve] #1 0x7138010000+0x30000000 hinted=0 running_total=768MB
 ```
 
-It does not need the 768 MB: the FEX arena's 4 GB already ends at `0x7138010000`
-and the band ceiling is `0x7180000000`, so 1152 MB is free above the arena and
-the reservation would fit at a much larger size too. `jumbo-mb` should therefore
-match the patched request rather than the original 3072.
+and then the arena itself fills during the level load and the game aborts in
+its own allocator (ml1222: commit cursor `0x2FFBD000` of `0x30000000`,
+`docs/ROTTR_HEAP_OOM.md`). The fix is the reverse: restore the stock 3072 MB
+(`tools/rotrr-heap-patch.py --restore`) and let the host serve that
+reservation from the boot jumbo holdback (`madeira.cfg`: `jumbo-mb = 3072`) --
+the holdback hands itself to the first guest reservation the kernel cannot
+place, which is exactly this ask.
 
 Two things about it that are worth not re-learning:
 
 - `VirtualAlloc(NULL, ...)` never fails on this device, because `VM_FLAGS_ANYWHERE`
-  finds somewhere in the 454 GB map. A game that spreads its arena out is not
-  stopped by the ceiling it was told about; it is stopped by fragmentation it
-  created itself, which is what the level-load abort turned out to be.
+  finds somewhere in the 454 GB map. The level-load abort is not the ceiling and
+  not fragmentation: it is the game's own arena really running out inside the
+  reservation it got (ml1222: cursor `0x2FFBD000` of `0x30000000`, no host
+  refusal anywhere -- `docs/ROTTR_HEAP_OOM.md`).
 - The 16 `[range-probe]` lines in that run show every slot Wine *preferred*
   (`0x7c…`, `0x74…`) sitting above the task ceiling, which is why the
   allocation fell back to hint 0 and landed inside the FEX arena instead.

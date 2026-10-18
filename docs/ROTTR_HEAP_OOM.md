@@ -1,13 +1,23 @@
 # ROTTR: the level-load "Out of memory", and why it is not ours
 
-**Status: UNRESOLVED. Not fixed, and not fixable from this tree.** The game
-still aborts on the first level load. Everything below is measured on a device
-run, and the conclusion is that the host never refused anything.
+**Status (2026-10-18 18:08, ml1222 + a full Ghidra pass over the stock exe):
+the refusal is closed -- the game's own 768 MB arena really ran out -- and the
+fix is designed; its first device run is next.** The stock binary reserves
+**3072 MB** at start-up; on device that reservation failed (`CDC: Unable to
+reserve 3072MB of address space.`, COMPAT.md), so the workaround lowered the
+constant to 768 MB. ml1222's live probe then shows that arena reaching its own
+end: commit cursor `0x2FFBD000` of `0x30000000` (274,432 bytes left) when a
+1,758,268-byte request arrived, and the grow path refusing **before any host
+call** (`[alloc-fail] 0`). The fix is to restore the stock constant
+(`tools/rotrr-heap-patch.py --restore`) and have the host serve that
+reservation from the boot jumbo holdback (`madeira.cfg`: `jumbo-mb = 3072`).
+*The refusal, closed* below is the traced chain; *The next run* is the
+experiment.
 
-**No claim is made that the level load now works.** Nothing in this repository
-changes the outcome: the refusal is inside the game's own allocator, and no
-setting, entitlement or host allocation change reaches it. What follows
-establishes *that* it is not ours, which is a different thing from fixing it.
+**No claim is made yet that the level load works** -- the fix's first run has
+not happened. What is established, end to end, is that the refusal is the
+game's own sizing and accounting, not a host refusal, and that one constant
+plus one setting is the lever.
 
 **Update 2026-10-18 14:11 (build `20261018T1055Z-4ba6df1e4e87`).** The failure
 has a second, *soft* surface, and on this build the fatal one did not appear.
@@ -28,12 +38,14 @@ format (`0x140d43dc0`, `ERROR: %s: ...`), the growing route (`{+0xf8}` ->
 `0x1403c4d20` -> `0x1403c6f80`). Two refusals, two routes; the "total free"
 number is the same computed value in both. That number is now traced to its
 last bit: `mstate[0x868] - this[0x40] - this[0x38]`, with `mstate[0x868]` an
-arena size fixed at construction -- 768 MB on this build's default heap. 981.1
-MB is larger than that whole arena, so the object that printed this dialog was
-*not* the default heap. The refusal itself is traced end to end below, and
-ml1221 (`[rotrr-heap]`, `MADEIRA_ROTRR_HEAP_PROBE=1`) walks *every* allocator
-object and prints each one's arena size and the exact "free" the message would
-print.
+arena size fixed at construction -- 768 MB on the patched builds, 3072 MB on
+the stock exe. This section once read a "total free" above that constant as
+proof that some *other* object printed the dialog; ml1222 settled it the other
+way: the printer was the default heap all along, and the number was inflated
+by counters that had drifted negative (*The drift*, below). The refusal itself
+is traced end to end below, and ml1221/ml1222 (`[rotrr-heap]`,
+`MADEIRA_ROTRR_HEAP_PROBE=1`) walks *every* allocator object and prints each
+one's arena size and the exact "free" the message would print.
 
 
 ## The failure
@@ -214,10 +226,13 @@ terms, one report -- and none of them is a measurement of the bins.
 
 `mstate[0x868]` is written in exactly two places, both constructors, and never
 extended at runtime: `0x1403c356c` (instances, from the size argument) and
-`0x1403c3723` (the default heap, from the same immediate that reserves the
-arena at `RVA 0x3C3717`). On this build's default heap it is `0x30000000`
-(768 MB) -- so a default-heap "total free" above 768 MB cannot exist, and the
-14:11 dialog's 981.1 MB cannot have come from that object.
+`0x1403c3723` (the default heap, from the register that also reserves the
+arena at `RVA 0x3C3717` -- one immediate sets both). The stock exe's default
+heap carries `0xC0000000` (3072 MB); the ml-series workaround exe carries
+`0x30000000` (768 MB). Because the value is a constant, any "total free"
+above it must come from negative `this+0x40`/`this+0x38` -- which is exactly
+what the live probe found (*The drift*), so the 14:11 dialog's 981.1 MB was
+the default heap under-reporting, not a different object.
 
 And the imports inside the allocator's own code, `0x1403c3700..0x1403c9000`:
 
@@ -278,14 +293,14 @@ next, and `[0x141006d78]` is the newest. That chain is what the probe walks --
 newest first, the default heap last.
 
 Note on the three fatal runs: their format prints the singleton's own name
-(`this+0x8`), but their `total free` (953.2-960.9 MB) is also above 768 MB.
-Either those binaries carried a larger arena constant (the patch tool accepts
-256-2048 MB values), or the value position in the format is not what it looks
-like; the probe's live `k868` line settles which. The 14:11 build is the
-patched-to-768 MB one (`[guest-reserve] ... running_total=768MB`), and the
-16:53 run of 2026-10-18 repeats both facts: named fatal form, `requested
-870240` (the same size the 17-10 fatal runs asked), `total free 1004119216`
-(`0x3bd9a4b0`, 957.6 MB -- again above 768 MB).
+(`this+0x8`), and their `total free` (953.2-960.9 MB) is also above 768 MB.
+They ran on the patched-to-768 MB binary, so a larger arena constant does not
+explain it; ml1222 settled the actual cause -- **negative counter drift**
+(*The drift*): any total above `k868` is possible late in a run. The 14:11
+build is the same patched one (`[guest-reserve] ... running_total=768MB`), and
+the 16:53 run of 2026-10-18 repeats it: named fatal form, `requested 870240`
+(the same size the 17-10 fatal runs asked), `total free 1004119216`
+(`0x3bd9a4b0`, 957.6 MB -- again the drift).
 
 ### The probe, revised once (ml1222)
 
@@ -317,17 +332,27 @@ which side won:
 From there the object/chain lines are unchanged. Whichever mapping is live is
 decided by the next run's log, not by assumption.
 
-## What is still unknown
+The 18:08 run settled it the same day: `-> live via=img`
+(`sing=0 head=0x12622ada0` -- the singleton pointer is still zero at the
+first tick while the chain head is already the object), and the singleton's
+fields tie the log together: `k860=0x713cdf0000` is exactly
+`[guest-reserve] #1 0x713cdf0000+0x30000000`, and `mvt=0x125f63350` is the
+OSHeap vtable at its relocated address (`0x125f63350 - 0x125220000 = 0xD43350`,
+the file RVA). The probe's `free868` then reproduced the game's dialog number
+to within 116 bytes -- same object, same formula (*The refusal, closed*).
 
-**The decision is no longer unknown: it is `0x1403c6a60`, traced end to end
-below. What is unknown is which term of the "free" number lied.** With the
-arena size a constant, if the refusing object was the default heap then at the
-14:11 refusal `this[0x40] + this[0x38]` was low by at least
-`1028736280 - 805306368 = 223429912` bytes; if it was an instance, its arena
-was simply the size the instance was built with. The probe's per-object lines
-decide which. The old slot histogram (`tools/pe-slot-histogram.py`: `+0x98`
-2760, `+0x90` 1622) is retired: `+0x98` is `free()`, not a reporter, and the
-reporter slots are named above.
+## What was still unknown, and how it settled
+
+**Which term of the "free" number lied: both lower terms, and the arena was
+full.** The 14:11 arithmetic was the right shape: at that refusal
+`this[0x40] + this[0x38]` was low by 223,429,912 bytes *if* the refusing
+object was the default heap -- and ml1222 showed exactly that, with the
+under-count by then at 538,012,412 bytes (both counters rounding through
+negative; *The drift*). The refusing object was the default heap every time,
+its arena cursor was at its end, and the "free" number was never a
+measurement. The old slot histogram (`tools/pe-slot-histogram.py`: `+0x98`
+2760, `+0x90` 1622) stays retired: `+0x98` is `free()`, not a reporter, and
+the reporter slots are named above.
 
 **The counter has no 64-bit reader — this was wrong, and it stopped the search.**
 `0x38` is written with `addq` and set with `movq`, and a scan of the whole
@@ -399,7 +424,8 @@ lever and also says the allocator asserts only once it believes it is live — a
 the refusal is reached through a **non-virtual** call, so it has ordinary direct
 call sites that a signature scan can find.
 
-**What would settle it**, in order of cost:
+**What would settle it** (every item is now done -- see *The refusal,
+closed* below), in order of cost:
 
 1. The game's own `VirtualAlloc` arguments at the failing call. The host counts
    successes and failures already; logging the size and flags of the last few
@@ -421,20 +447,158 @@ call sites that a signature scan can find.
 
 All of these are host-side and none needs the executable.
 
+## The refusal, closed -- and the allocator, from the binary
+
+ml1222 answered every open item in one run. The 18:08 log, with
+`MADEIRA_ROTRR_HEAP_PROBE=1`:
+
+```
+[guest-log] #60 tid=0038 15:11:24:665 > [ASSERT] Fatal error: ERROR: Out of
+  memory, "UNKNOWN" requested 1758268 bytes (1717.1 kB 1.7 MB)
+  (1343318664 total free (1311834.6 kB 1281.1 MB))
+```
+
+(log line 30885; the no-name fast form, format `0x140d43d50`), and the
+singleton probe line a few ticks later (line 31375):
+
+```
+[rotrr-heap] rev=ml1222 sing mvt=0x125f63350 k818=0x1000 k820=0x10 k828=0
+  k830=0x713cdf0000 k838=0x2ffbd0002ffbd000 k858=0x716cdad000
+  k860=0x713cdf0000 k868=0x30000000 free868=1343318780 ...
+```
+
+`k858 - k860 = 0x716cdad000 - 0x713cdf0000 = 0x2FFBD000` of
+`k868 = 0x30000000`: **274,432 bytes of the arena were left** and the request
+was 1,758,268 bytes, so the refusal is real exhaustion of this 768 MB arena,
+decided inside the game before any host call (`[alloc-fail] 0`). `free868`
+within 116 bytes of the dialog's number confirms the printer was this object,
+the default heap.
+
+A full Ghidra import of the **stock** exe (12.1.4, through REA; 47,797
+procedures; sha256 `D56353D9CFDC...`, the 3072 MB build -- the copy that ran
+ml1222, sha256 `1C44C620FEDD...`, differs only in the one immediate) rebuilt
+the whole stack and closed the loop:
+
+| what | address | fact |
+|---|---|---|
+| reservation | ctor RVA `0x3C3690`, call at `0x1403C373E` | `VirtualAlloc(NULL, 0xC0000000, 0x2000 /*MEM_RESERVE*/, 4 /*PAGE_READWRITE*/)` -- once, no retry, no fallback; through IAT slot `0x140D02A20` |
+| on failure | same ctor | `sprintf(0x14004B9C0, "Unable to reserve %uMB of address space." /* 0x140D43D10 */, cap >> 20)`, `MessageBoxA(..., "CDC", 0x2030)`, `ExitProcess(-1)` |
+| the immediate | RVA `0x3C3717` / file off `0x3C2D17` | `mov edx, 0xC0000000`; `RDX` is both the reserve size and what `mov [rbx+0x868], rdx` stores -- one immediate sets both |
+| grow | `0x1403C73A0` = OSHeap `vtable 0x140D43350` slot `+0x10` | see below |
+| allocator | `0x3C6A60` | bins + top chunk; refusal `xor eax,eax` at `0x1403C6F37` |
+| extend wrapper | `0x3C8F70` | reads the top chunk, calls the mstate's `{+0x10}`, re-reads, gives up |
+
+### The grow function, decompiled end to end
+
+`0x1403C73A0(mstate, delta)`: `delta == 0` returns the cursor; `delta < 0`
+decommits (`VirtualFree(..., 0x4000 /*MEM_DECOMMIT*/)`) and can walk the
+cursor back to the base; `delta > 0` **first** compares
+`align_up(cursor + delta, page)` against `base + cap` and returns `-1` when it
+does not fit -- **no host call at all** -- and only inside that bound calls
+`VirtualAlloc(align_up(cursor), delta - padding, 0x1000 /*MEM_COMMIT*/, 4)`
+to commit the new pages in place, then advances `+0x858` by `delta`. So the
+arena is commit-on-demand inside one fixed reservation, and its ceiling is
+arithmetic the game does to itself. At ml1222:
+`align_up(base + 0x2FFBD000 + 1.76 MB + slack) > base + 0x30000000` -> `-1`
+-> `0x3C8F70` re-reads the top chunk, still cannot satisfy -> `0x3C6A60`
+returns NULL -> the report fires.
+
+### The drift
+
+The three terms of "total free" are read live; two of them drift. Singleton
+samples from the 18:08 log (`allocs` is the 32-bit field at `+0x30`, `used`
+the 64-bit field at `+0x38`, both printed as *signed*):
+
+| log line | `allocs` | `used` | `free868` |
+|---|---|---|---|
+| #6109 | -139 | -24,148 | 805,330,516 |
+| #10861 | -23,530 | -6,979,768 | 812,286,136 |
+| #13105 | -37,632 | -25,233,488 | 830,539,856 |
+| #31375 (death) | -- | -538,012,412 | 1,343,318,780 |
+
+Every row is exactly `free868 = 0x30000000 - x40 - used` (`x40 = 0` here), so
+the printer is doing what the code says; the *inputs* are wrong. Both counters
+are already negative minutes into the run and grow more negative with churn --
+an allocation-accounting asymmetry (frees subtracting what an allocation path
+never added); the exact site pair is not traced and does not need to be. What
+it means for reading logs: **any dialog "total free" above `k868` is drift,
+not space** -- the 14:11 981.1 MB and the 18:08 1281.1 MB are the same
+artefact, and the fatal runs' 953-960 MB numbers too. The cursor (`k858` vs
+`base + k868`) is the one number the drift cannot touch, and the probe prints
+both.
+
+### The VirtualAlloc census
+
+`VirtualAlloc` has **15 call sites** in the exe, and the default heap's is the
+only large hard-coded reservation -- the tool's docstring always said the
+other 14 take their size from a register, and the import pass confirms exactly
+that. Nothing else in the binary asks for hundreds of MB of address space up
+front; the texture/streaming pools and the MemHeap regions size themselves at
+run time. So the 3 GB claim has exactly one lever, and
+`tools/rotrr-heap-patch.py` holds it.
+
 ## What is explicitly ruled out
 
 | hypothesis | verdict | evidence |
 |---|---|---|
 | RAM / jetsam | out | 1905 MB of 3376 MB; `[footprint]` flat |
-| the 3072 MB reservation | fixed | `[guest-reserve] #1 ... running_total=768MB` |
+| the 3072 MB reservation | **workaround, superseded** | lowered to 768 MB (`[guest-reserve] #1 ... running_total=768MB`) -- then that arena itself ran out (ml1222). Fix: restore 3072 and serve it from the boot holdback, *The next run* |
 | FEX arena exhaustion | out | 4096 MB, flat; `[fex-headroom]` 87% at worst |
 | address-space fragmentation | out | band frozen, every owner `grew 0` |
 | the swap tier | out | `[swap] ... refused 0`, `disk-full refusals 0` |
 | the video-budget trim | out | `[wmt] ml1075 video budget now 2048 MB (base 2048, footprint 1025 of 3376)` — never moved |
 | a misleading `ullTotalVirtual` | out | 512 GB reported, 454 GB real, and the real map has 10 GB free gaps. **Already implemented**: `ios_clamp_user_space_limit()` (ml990) clamps to the measured `host_addr_space_limit`; `MADEIRA_WIDE_USER_VA=1` disables it |
 
-## The 3072 MB reservation, resolved
+## The 3072 MB reservation, resolved -- and un-lowered
 
-`COMPAT.md` records it as unpatched and untested. Both are now settled: see
-`tools/rotrr-heap-patch.py` and the on-device result above. The constant at RVA
-`0x3C3717` is lowered to 768 MB and the reservation succeeds.
+`COMPAT.md` recorded it as unpatched and untested; both are settled. The
+constant at RVA `0x3C3717` was lowered to 768 MB and the reservation succeeds
+(the run above) -- and ml1222 shows that arena then really runs out during the
+level load. The fix direction is therefore the reverse: **restore the stock
+3072 MB** (`tools/rotrr-heap-patch.py --restore`) and have the host serve that
+reservation from the boot jumbo holdback (`madeira.cfg`: `jumbo-mb = 3072`).
+The holdback already exists for exactly this shape of ask: it is carved at
+boot, then handed to the first guest reservation the host cannot place
+(`ios_jumbo_holdback_take`, `build/ntdll-unix/virtual_ios.c`).
+
+Two file identities, so future logs don't have to be guessed at:
+`sha256 D56353D9CFDC...` = stock (immediate `0xC0000000`); `sha256
+1C44C620FEDD...` = the 768 MB patched copy that ran to the level load. (The
+same two files the patch tool round-trips.)
+
+## The next run (device experiment)
+
+One logical change, two halves: stop capping the arena; serve the stock one
+from the host.
+
+1. **Exe** -- `python tools/rotrr-heap-patch.py "D:\Rise of the Tomb Raider\ROTTR.exe" --restore`
+   (timestamped `.bak` first; prints `edx = 0xC0000000`). Put the restored exe
+   back into the app container the same way the patched copy got there.
+2. **Device config** -- add `jumbo-mb = 3072` to `Documents/madeira.cfg`. Keep
+   everything else as the 18:08 run had it: `pool = 512`, `map-trace = 1`,
+   `env.MADEIRA_ROTRR_HEAP_PROBE = 1`, and that run's own swap/video values
+   (its log shows the swap tier at 4096 MB and the video budget at 4096 MB).
+3. **Launch and read the log for**:
+   - `[jumbo-hold] ml996 want=3072 MB; largest free hole 0x... +... MB`
+     followed by `[jumbo-hold] ml996 HELD 0x... +3072 MB PROT_NONE` -- the
+     holdback armed at boot;
+   - at the game's reserve: either it is placed normally and only
+     `[guest-reserve] #1 0x...+0xc0000000` appears (the holdback stays held --
+     also a success), or the host hands the holdback over:
+     `[jumbo] kernel-pick reserve failed ... top window is full` ->
+     `[jumbo-hold] ml996 releasing the holdback 0x... +3072 MB for a 3072 MB
+     request` -> `[jumbo-hold] ml997 mapped at the holdback -> 0x...
+     size=0xc0000000 st=0x0` (the retry-walk branch prints `ml996 mapped`);
+   - probe: `k868=0xc0000000`, and `k858 - k860` passing `0x30000000` over
+     time;
+   - the run passing the point where 18:08 died.
+4. **If the reserve fails instead** -- the game puts up its own `CDC: Unable
+   to reserve 3072MB of address space.` dialog; capture the `[jumbo-hold]`
+   and `[guest-reserve]` lines (the boot line says which of "NOT holding" /
+   "FAILED errno=" happened), then either raise `jumbo-mb` (3584) or fall
+   back to a retuned cap (`--mb 1024`).
+
+Expected side effect: the arena now commits past 768 MB for real. The 18:08
+run's footprint peaked at 3375 MB of the 3376 MB limit while the arena was
+capped, so the next constraint to watch is memory pressure, not the arena --
+`[footprint]` and the swap census lines in the same log.
