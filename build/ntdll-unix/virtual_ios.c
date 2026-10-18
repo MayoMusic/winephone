@@ -1046,6 +1046,173 @@ static unsigned ios_warmer_sweep_cycles( void )
     return v;
 }
 
+/* ml1221: ROTTR's allocator objects, all of them, read live from the host.
+ *
+ * The 14:11 run put up the game's own dialog -- "Out of memory, "UNKNOWN"
+ * requested 112460 bytes (... 1028736280 total free ...)" -- while the host
+ * refused nothing ([alloc-fail] 0, [map-fail] 0, [map-rate] fail=0 to the
+ * last second).  The refusal is inside 0x1403c6a60, the bins+top search; the
+ * dialog's format (0x140d43d50, no allocator name) is the fast route
+ * ({+0x90} -> 0x1403c4b20 -> {+0xf0} -> 0x1403c4ed0).  The "total free" in
+ * the message is not a measurement: {+0xd0} (0x1403c5d20) computes
+ *
+ *     free = (*{+0xc8})()               - this[0x40] - this[0x38]
+ *          = mstate->vtable[+0x8](mstate) - this[0x40] - this[0x38]
+ *          = mstate[0x868]                - this[0x40] - this[0x38]
+ *
+ * because the mstate's {+0x8} is 0x1403c7270, literally "mov 0x868(%rcx),%rax;
+ * ret", and mstate[0x868] is an arena size fixed when the object was built:
+ * 0x30000000 (768 MB) for the singleton, 0x100000 for the init-time
+ * "ThreadSafeMemHeapAllocator", 0x400000 for "cdcRenderer Internal Heap", and
+ * a computed block for every "MemHeapAllocator" created on demand by
+ * 0x1403c35c0 / 0x1403c3990.  The dialog said 1028736280 (981.1 MB) free,
+ * which is larger than the singleton's whole arena -- so the refusing object
+ * was an instance, not the singleton, and ml1220's single object could not
+ * have answered it.  Every allocator object is linked from its constructor
+ * (0x1403c3460): this+0x10 = the object built before it, this+0x18 the one
+ * after, and [0x141006d78] is the newest.  Walk that chain and print each
+ * object, so one run names the instance whose k868/x40/used match the dialog.
+ * The two mstate flavours matter too: vtable 0x140d43350 (the default's)
+ * grows by committing inside the reservation (0x1403c73a0 -> VirtualAlloc),
+ * while 0x140d43330 (the instances') grows by bumping a cursor inside the
+ * block it was handed (0x1403c7340) -- the latter can refuse without ever
+ * reaching the host.
+ *
+ * Reads go through mach_vm_read_overwrite -- an unmapped address is an error,
+ * not a crash -- and every address is ROTTR.exe image base 0x140000000 + RVA.
+ * Off unless MADEIRA_ROTRR_HEAP_PROBE=1.  See docs/ROTTR_HEAP_OOM.md. */
+static int ios_rotrr_heap_probe_wanted( void )
+{
+    static int v = -1;
+    if (v < 0)
+    {
+        const char *e = getenv( "MADEIRA_ROTRR_HEAP_PROBE" );
+        v = e && *e && strcmp( e, "0" ) != 0;
+    }
+    return v;
+}
+
+static int ios_rotrr_probe_read( unsigned long long va, void *out, size_t n )
+{
+    mach_vm_size_t got = 0;
+    if (!va) return 0;
+    return mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)va, (mach_vm_size_t)n,
+                                   (mach_vm_address_t)(uintptr_t)out, &got ) == KERN_SUCCESS &&
+           got == (mach_vm_size_t)n;
+}
+
+/* ml1221: the object's name, this+0x8 -> a static C string.  Unprintables and
+ * '%' fold to '.' -- this text goes into a printf format, and a stale chain
+ * must not turn a bad pointer into a format directive. */
+static void ios_rotrr_probe_name( unsigned long long obj, char *out, size_t on )
+{
+    unsigned char nb[40];
+    unsigned long long name = 0;
+    size_t i;
+
+    out[0] = '\0';
+    if (on < 2 || !ios_rotrr_probe_read( obj + 0x8, &name, sizeof(name) ) || !name) return;
+    if (!ios_rotrr_probe_read( name, nb, sizeof(nb) )) return;
+    nb[sizeof(nb) - 1] = '\0';
+    for (i = 0; nb[i] != '\0' && i + 1 < on && i < sizeof(nb) - 1; i++)
+        out[i] = (nb[i] >= 0x20 && nb[i] < 0x7f && nb[i] != '%') ? (char)nb[i] : '.';
+    out[i] = '\0';
+}
+
+/* ml1221: one allocator object, two lines; a failed read drops its field, not
+ * the line.  Offsets and their meaning are the map in docs/ROTTR_HEAP_OOM.md. */
+static void ios_rotrr_probe_object( const char *tag, unsigned long long obj )
+{
+    unsigned char obuf[0x60], wbuf[0x40], kbuf[0x58];
+    unsigned long long used = 0, x40 = 0, mstate = 0, sub = 0;
+    unsigned long long mvt = 0, w08 = 0, w10 = 0, w18 = 0, w20 = 0, w28 = 0, w30 = 0, w38 = 0;
+    unsigned long long k818 = 0, k820 = 0, k828 = 0, k830 = 0, k838 = 0, k858 = 0, k860 = 0, k868 = 0;
+    unsigned long long cap_obj = 0;
+    unsigned base = 0, limit = 0, allocs = 0, f50 = 0;
+    unsigned char b51 = 0, b52 = 0;
+    char name[36];
+
+    if (!ios_rotrr_probe_read( obj + 0x28, obuf, sizeof(obuf) ))
+    {
+        dprintf( 2, "[rotrr-heap] rev=ml1221 %s obj=%#llx unreadable\n", tag, obj );
+        return;
+    }
+    memcpy( &base,   obuf + 0x00, 4 );   /* this+0x28 arena base (32-bit by design) */
+    memcpy( &limit,  obuf + 0x04, 4 );   /* this+0x2c arena limit                 */
+    memcpy( &allocs, obuf + 0x08, 4 );   /* this+0x30 outstanding-allocation count */
+    memcpy( &used,   obuf + 0x10, 8 );   /* this+0x38 in-use bytes   (free: -=)    */
+    memcpy( &x40,    obuf + 0x18, 8 );   /* this+0x40 the second term of "free"    */
+    memcpy( &mstate, obuf + 0x20, 8 );   /* this+0x48 dlmalloc mstate              */
+    memcpy( &f50,    obuf + 0x28, 4 );   /* this+0x50 size word                    */
+    b51 = obuf[0x29];                    /* this+0x51 lock bypass flag             */
+    b52 = obuf[0x2a];                    /* this+0x52 ready/report flag            */
+    memcpy( &sub,    obuf + 0x58, 8 );   /* this+0x80 first subheap                */
+
+    cap_obj = ((unsigned long long)limit - base) & 0xffffffffULL;
+    ios_rotrr_probe_name( obj, name, sizeof(name) );
+    dprintf( 2, "[rotrr-heap] rev=ml1221 %s obj=%#llx base=%#x limit=%#x cap_obj=%llu allocs=%u "
+                "used=%llu x40=%llu mstate=%#llx f50=%#x b51=%u b52=%u sub=%#llx name=\"%s\"\n",
+             tag, obj, base, limit, cap_obj, allocs, used, x40, mstate, f50, b51, b52, sub, name );
+
+    if (!mstate) return;
+    if (ios_rotrr_probe_read( mstate, wbuf, sizeof(wbuf) ))
+    {
+        memcpy( &mvt, wbuf + 0x00, 8 );  /* mstate vtable; {+0x8} is the free base      */
+        memcpy( &w08, wbuf + 0x08, 8 );  /* = what 0x1403c7270 returns, mstate[0x868]   */
+        memcpy( &w10, wbuf + 0x10, 8 );
+        memcpy( &w18, wbuf + 0x18, 8 );
+        memcpy( &w20, wbuf + 0x20, 8 );
+        memcpy( &w28, wbuf + 0x28, 8 );
+        memcpy( &w30, wbuf + 0x30, 8 );
+        memcpy( &w38, wbuf + 0x38, 8 );
+    }
+    if (ios_rotrr_probe_read( mstate + 0x818, kbuf, sizeof(kbuf) ))
+    {
+        memcpy( &k818, kbuf + 0x00, 8 );  /* +0x818 page size (0x1000)              */
+        memcpy( &k820, kbuf + 0x08, 8 );  /* +0x820 alloc grain (0x10 default; bigger for some instances) */
+        memcpy( &k828, kbuf + 0x10, 8 );  /* +0x828 arena base                      */
+        memcpy( &k830, kbuf + 0x18, 8 );  /* +0x830 -1 until the first grow         */
+        memcpy( &k838, kbuf + 0x20, 8 );  /* +0x838 high-water of the bump cursor   */
+        memcpy( &k858, kbuf + 0x40, 8 );  /* +0x858 arena start (bump base)         */
+        memcpy( &k860, kbuf + 0x48, 8 );  /* +0x860 bump cursor (grow advances it)  */
+        memcpy( &k868, kbuf + 0x50, 8 );  /* +0x868 arena size = the "free" base    */
+    }
+    /* The dialog's number, reproduced exactly as 0x1403c5d20 computes it.  On
+     * the singleton this can never exceed its 768 MB arena; the 14:11 dialog
+     * said 981.1 MB, so the object whose line matches is the one to blame. */
+    dprintf( 2, "[rotrr-heap] rev=ml1221 %s mvt=%#llx k818=%#llx k820=%#llx k828=%#llx k830=%#llx "
+                "k838=%#llx k858=%#llx k860=%#llx k868=%#llx free868=%lld w08=%#llx w10=%#llx "
+                "w18=%#llx w20=%#llx w28=%#llx w30=%#llx w38=%#llx\n",
+             tag, mvt, k818, k820, k828, k830, k838, k858, k860, k868,
+             (long long)(k868 - x40 - used), w08, w10, w18, w20, w28, w30, w38 );
+}
+
+static void ios_rotrr_heap_probe( void )
+{
+    static int said_unready;
+    unsigned long long head = 0, sing = 0, cur = 0, prev = 0;
+    int i;
+
+    if (!ios_rotrr_heap_probe_wanted()) return;
+    if (!ios_rotrr_probe_read( 0x141006d80ULL, &sing, sizeof(sing) )) sing = 0;
+    if (!ios_rotrr_probe_read( 0x141006d78ULL, &head, sizeof(head) )) head = 0;
+    if (!sing && !head)
+    {
+        if (!said_unready++)
+            dprintf( 2, "[rotrr-heap] rev=ml1221 no allocator object yet (ROTTR.exe not loaded?) "
+                        "-- probe stays quiet until there is one\n" );
+        return;
+    }
+    if (sing) ios_rotrr_probe_object( "sing", sing );
+    cur = head;
+    for (i = 0; i < 15 && cur; i++)
+    {
+        if (cur != sing) ios_rotrr_probe_object( "list", cur );
+        if (!ios_rotrr_probe_read( cur + 0x10, &prev, sizeof(prev) )) break;
+        cur = prev;
+    }
+}
+
 static void *ios_pool_warmer_thread( void *arg )
 {
     unsigned cycle = 0;
@@ -1310,6 +1477,11 @@ static void *ios_pool_warmer_thread( void *arg )
                                 (unsigned long long)vmi.external >> 20,
                                 (unsigned long long)vmi.reusable >> 20,
                                 avail_mb, limit_mb, cycle);
+
+                        /* ml1221: the game's own heap accounting, live (docs/ROTTR_HEAP_OOM.md).
+                         * ~every 10 s; every allocator object in the chain, not just the
+                         * singleton; a no-op unless MADEIRA_ROTRR_HEAP_PROBE=1. */
+                        if ((cycle % 5) == 0) ios_rotrr_heap_probe();
                     }
                 }
             }
